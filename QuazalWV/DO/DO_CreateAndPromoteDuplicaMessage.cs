@@ -9,6 +9,11 @@ namespace QuazalWV
 {
     public static class DO_CreateAndPromoteDuplicaMessage
     {
+        // REVERTED to the original no-op. The implemented version (parse + DO_Session.DupObjs.Add +
+        // reply DO_Outcome.Create(callID, 0)) was suspected of crashing the client during
+        // connect/session setup and is NOT dispatched from DO.cs. The full implementation + the
+        // expected wire format are preserved in RE/plan/05-createandpromote-duplica.md; re-enable
+        // only after confirming the correct response against a packet capture.
         public static byte[] HandleMessage(ClientInfo client, byte[] data)
         {
             Log.WriteLine(2, "[DO] Handling DO_CreateAndPromoteDuplicaMessage... TODO!");

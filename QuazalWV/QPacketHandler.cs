@@ -124,6 +124,7 @@ namespace QuazalWV
             while (true)
             {
                 QPacket p = new QPacket(data);
+                Log.WriteLine(1, "[" + source + "] [STALLDIAG] PKT type=" + p.type + " vp=" + p.m_oSourceVPort.type + " seq=" + p.uiSeqId);   // every packet the synchronous receive loop starts processing (so we see if the thread is alive / what it's stuck on)
                 MemoryStream m = new MemoryStream(data);
                 byte[] buff = new byte[(int)p.realSize];
                 m.Seek(0, 0);
@@ -156,9 +157,17 @@ namespace QuazalWV
                         break;
                     case QPacket.PACKETTYPE.DATA:
                         if (p.m_oSourceVPort.type == QPacket.STREAMTYPE.OldRVSec)
+                        {
+                            Log.WriteLine(1, "[" + source + "] [STALLDIAG] >>> RMC.HandlePacket START seq=" + p.uiSeqId);
                             RMC.HandlePacket(listener, p);
+                            Log.WriteLine(1, "[" + source + "] [STALLDIAG] <<< RMC.HandlePacket DONE seq=" + p.uiSeqId);   // a START with no matching DONE == THIS call hung the receive loop
+                        }
                         if (p.m_oSourceVPort.type == QPacket.STREAMTYPE.DO)
+                        {
+                            Log.WriteLine(1, "[" + source + "] [STALLDIAG] >>> DO.HandlePacket START seq=" + p.uiSeqId);
                             DO.HandlePacket(listener, p);
+                            Log.WriteLine(1, "[" + source + "] [STALLDIAG] <<< DO.HandlePacket DONE seq=" + p.uiSeqId);
+                        }
                         break;
                     case QPacket.PACKETTYPE.DISCONNECT:
                         if (client != null)

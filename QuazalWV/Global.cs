@@ -17,6 +17,20 @@ namespace QuazalWV
         public static uint pidCounter = 0x1234;
         public static uint dummyFriendPidCounter = 0x1235;
         public static string sessionURL = "prudp:/address=127.0.0.1;port=21032;RVCID=4660";
+        // Player spawn transform (world coords) written into the entity-create replica
+        // (MSG_ID_Net_Obj_Create, msg 0x271). The schema/offset is verified against the game's
+        // cObjectManager::SerializeOneEntity (RE/plan/03-spawn-replica-schema.md): col3 of the 4x4
+        // matrix = translation. (0,0,0) is the world origin and is almost never a valid spawn point,
+        // which is why the player appears at the origin. Set these to a real in-bounds coordinate for
+        // the loaded map (extract from the map's zen::SpawnZone data in Yeti.big via GROExplorerWV).
+        // Fallback spawn transform if a real one can't be read from Yeti.big (see below).
+        public static float spawnX = 0f;
+        public static float spawnY = 0f;
+        public static float spawnZ = 0f;
+        // Path to the game's Yeti.big. The dedicated server reads real per-map spawn-zone
+        // coordinates from it at runtime (YetiBigSpawnReader) so players spawn in-bounds.
+        // Point this at the Yeti.big of the game install the clients use.
+        public static string yetiBigPath = @"D:\Phoenix\GRO\GRO\PDC-Live-WV\Yeti.big";
         public static List<ClientInfo> clients = new List<ClientInfo>();
         public static Stopwatch uptime = new Stopwatch();
 

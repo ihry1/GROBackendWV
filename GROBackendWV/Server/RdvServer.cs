@@ -39,6 +39,7 @@ namespace GROBackendWV
         {
             WriteLog(1, "Server started");
             listener = new UdpClient(listenPort);
+            try { listener.Client.IOControl(unchecked((int)0x9800000C), new byte[] { 0, 0, 0, 0 }, null); } catch { }  // SIO_UDP_CONNRESET: suppress Windows UDP reset storm when a client quits
             IPEndPoint ep = new IPEndPoint(IPAddress.Any, 0);
             while (true)
             {

@@ -42,6 +42,7 @@ namespace QuazalWV
                             {
                                 if (user.pass == h.password)
                                 {
+                                    client.PID = user.PID; // adopt the authenticated account's PID (previously the SYN-counter PID was kept, so all later per-player DB lookups keyed off the wrong PID)
                                     reply = new RMCPacketResponseLoginCustomData(client.PID, client.sPID, client.sPort);
                                     client.name = h.username;
                                     client.pass = h.password;

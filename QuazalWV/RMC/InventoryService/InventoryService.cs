@@ -31,7 +31,7 @@ namespace QuazalWV
                     RMC.SendResponseWithACK(client.udp, p, rmc, client, reply);
                     break;
                 case 6:
-                    reply = new RMCPacketResponseInventoryService_GetUserInventoryByBagType(p.payload[21], p.payload[17]);
+                    reply = new RMCPacketResponseInventoryService_GetUserInventoryByBagType(client, p.payload[21], p.payload[17]);
                     RMC.SendResponseWithACK(client.udp, p, rmc, client, reply);
                     break;
                 case 16:

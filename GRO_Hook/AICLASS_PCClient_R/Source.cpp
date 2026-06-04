@@ -58,6 +58,10 @@ void Log(char* str)
 
 void DetourFireFunctions();
 void DetourEventHandlerFunctions();
+void DetourClassInfoDiag();
+void DetourGestureDiag();
+void DetourMoodFix();
+void DetourDeployDiag();
 
 void WriteByte(DWORD address, BYTE b)
 {	
@@ -147,6 +151,19 @@ void Patch6()
 	WriteBuffer(baseAddressAI + 0x1D0CB0, patch, 2);
 }
 
+void Patch7()
+{
+	// Patch5 forces InitEntity's serializationFlags&2 (dedicated-server) block to run on the client.
+	// That block calls ClassInfoRdvPC::SerializeRDVClassInfo, which asserts "Cannot find player RDV
+	// class info" (ClassInfoRdvPC.cpp:1205) when the (pid,classId) wrapper entry is missing. The only
+	// seeder of that entry is ClassInfoRdvPC::FetchPlayerData, gated by `if (IsServer())` -> never runs
+	// on the client. NOP the `jz` right after the IsServer() check (AICLASS 0x101CDAC4) so FetchPlayerData
+	// proceeds to ds_InitLists/ds_BuildClassInfoBaseValues and creates the entry -> no assert.
+	BYTE patch[] = {0x90, 0x90};
+	WriteBuffer(baseAddressAI + 0x1CDAC4, patch, 2);
+	Log("Patched ClassInfoRdvPC::FetchPlayerData IsServer gate (client self-seeds RDV class info)\n");
+}
+
 void CreateServerPatch()
 {
 	/*
@@ -224,8 +241,11 @@ void ReplaceVelocity()
 void DetourMain()
 {
 	char buffer[512];
-	if(FileExists("_debug_output_"))
-	OpenConsole();
+	// Drop a "_debug_output_" file next to the game exe to re-enable the UI/Flash event
+	// tracing (console + per-call logging). Off by default — see the gate below.
+	bool debugOutput = FileExists("_debug_output_");
+	if(debugOutput)
+		OpenConsole();
 	ClearFile(logFilename);
 	Log("GRO Hook made by Warranty Voider\n");
 	baseAddressAI = (DWORD)GetModuleHandleA("AICLASS_PCClient_R_org.dll");
@@ -244,24 +264,60 @@ void DetourMain()
 	}
 	sprintf(buffer,"RDV DLL Base = 0x%08X\n\0", baseAddressRDV);
 	Log(buffer);
-	DetourFireFunctions();
-	DetourEventHandlerFunctions();
+	// PERF: these install ~60 detours that fopen/fprintf/fclose the log on EVERY call
+	// (FIR_SetVariable*, UI_DispatchEvent, FIR_FireEvent, per-model OnEvent/OnBusEvent).
+	// The Scaleform HUD fires those hundreds of times per frame -> synchronous disk I/O
+	// on the UI thread cripples framerate. Tracing is a RE/debug aid, not required by the
+	// emulator, so it is OFF unless a "_debug_output_" file is present.
+	if(debugOutput)
+	{
+		DetourFireFunctions();
+		DetourEventHandlerFunctions();
+	}
 	//EnableDebugScreen1();
 	//EnableDebugScreen2();
 	//EnableDebugScreen3();
 	//EnableDebugScreen4();
 	//EnableDebugScreen5();
-	Patch1();	//crash1
-	Patch2();	//crash2
+	// Locomotion (walk) VALIDATION GATE. Default = Patch1 (blunt ret on sub_100ECC30): safe lobby, no walk.
+	// If a "_walktest_" file exists in the game dir, install the LOCAL-PLAYER-ONLY LocomotionApply detour
+	// INSTEAD (Patch1 skipped). The detour (HookedFunctions.h) runs sub_100ECC30 ONLY for the local pawn's
+	// cGestureMix (*(playerAddress+0xF6C)+8) -- so it can't touch lobby/char-select characters (the old gate's
+	// crash). Requires "_moodfix_" armed (it populates dword5CC). Purpose: prove running sub_100ECC30 makes the
+	// body walk before building the server-side spawn-ordering fix. Delete "_walktest_" to revert to Patch1.
+	if (FileExists("_walktest_"))
+	{
+		org_LocomotionApply = (char*(__fastcall*)(void*, void*)) DetourFunction((PBYTE)(baseAddressAI + 0xECC30), (PBYTE)LocomotionApply_guard);
+		Log("WALKTEST: local-player LocomotionApply detour installed on sub_100ECC30 (Patch1 SKIPPED)\n");
+	}
+	else
+	{
+		Patch1();	//crash1 (AI_EntityHumanModel anim dword5CC null-deref — client anim init-ordering)
+	}
+	Patch2();	//crash2 — RE-ENABLED: removing it regressed the client. DS reached DO Migration but the client never sent AskForSynchronize (0xA3) -> stuck "connecting to match server". The in-match-load path still hits GR5_UserItem::GetRPPrice; the data-coverage argument wasn't sufficient.
 	Patch3();	//keyboard input
-	Patch4();	//cDNAManager::bCanSendEvent
-	Patch5();	//AI_EntityPlayer::InitEntity server check
-	Patch6();	//cObjectHealth::SetDefaultHitPointsServer call cancel
+	Patch4();	//cDNAManager::bCanSendEvent — RE-ENABLED with Patch2 (couldn't isolate which removal caused the stall without an A/B test; restoring both to recover the deploy-screen state)
+	// Patch5/6/7 DISABLED — they forced the client into the dedicated-server entity-init path,
+	// which then needs server-side RDV models (SkillsModel/InventoryModel) that don't exist for the
+	// emulated player -> FetchPlayerData null-deref hard crash. Core fix: let the pawn be a normal
+	// client entity (serializationFlags&2 == 0) so InitEntity skips the whole DS block and the
+	// ClassInfo entry is seeded by the normal 0x271 create-blob deserialize (DeserializeMemBuffers).
+	//Patch5();	//AI_EntityPlayer::InitEntity server check
+	//Patch6();	//cObjectHealth::SetDefaultHitPointsServer call cancel
+	//Patch7();	//FetchPlayerData IsServer gate
 	//CreateServerPatch();
 	//OnPeerConnectionPatch();
 	//IsServerPatch();
 	//GetPeerIndexPatch();
 	ExportPlayerAddress();
+	if(FileExists("_ci_diag_"))		//drop an empty "_ci_diag_" file in the game dir to log ClassInfo store/lookup keys
+		DetourClassInfoDiag();
+	if(FileExists("_gesture_diag_"))	//drop an empty "_gesture_diag_" file to log gesture/mood/dword5CC (A-pose) activity
+		DetourGestureDiag();
+	if(FileExists("_moodfix_"))		//drop an empty "_moodfix_" file to re-fire UpdateMood once anim banks finish loading (fixes A-pose). Integer-only hook; no logging.
+		DetourMoodFix();
+	if(FileExists("_deploydiag_"))	//drop an empty "_deploydiag_" file to log (on-change) the deploy-ramp gate state for the local pawn. FP-safe (fxsave/fxrstor-bracketed, integer-only path).
+		DetourDeployDiag();
 	//ReplaceVelocity();
 	//ZEN_Init(baseAddressAI);
 }
@@ -346,4 +402,54 @@ void DetourEventHandlerFunctions()
 	AddHandler((DWORD*)(baseAddressAI + 0x2A0540), "AI_UICoreManager_2");
 	AddHandler((DWORD*)(baseAddressAI + 0x2A0B20), "AI_UICoreManager_3");
 	AddHandler((DWORD*)(baseAddressAI + 0x2A3F28), "AI_WeaponCustomizePopUp");
+}
+
+void DetourClassInfoDiag()
+{
+	sprintf(buffer, "[CI] baseAddressAI=0x%08X  (GS caller RVA = caller - base)\n\0", (DWORD)baseAddressAI);
+	Log(buffer);
+	org_DeserializeMemBuffers_diag = (char(__fastcall*)(void*,int,int,int,void*)) DetourFunction((PBYTE)(baseAddressAI + 0x1CD9B0), (PBYTE)DeserializeMemBuffers_diag);
+	Log("Hooked ClassInfoRdvPC::DeserializeMemBuffers (CI diag)\n");
+	org_GetEntryFromWrapperList_diag = (DWORD*(__thiscall*)(void*,int*)) DetourFunction((PBYTE)(baseAddressAI + 0x1C8050), (PBYTE)GetEntryFromWrapperList_diag);
+	Log("Hooked ClassInfoRdvPC::GetEntryFromWrapperList (CI diag)\n");
+	org_GetStruct_diag = (int(__thiscall*)(void*,void*,int)) DetourFunction((PBYTE)(baseAddressAI + 0x960A0), (PBYTE)GetStruct_diag);
+	Log("Hooked cMemBuffer::GetStruct (CI diag)\n");
+}
+
+void DetourGestureDiag()
+{
+	org_GetActionIndexFromCode_diag = (unsigned short(__fastcall*)(void*,void*,int)) DetourFunction((PBYTE)(baseAddressAI + 0xDD220), (PBYTE)GetActionIndexFromCode_diag);
+	Log("Hooked cGesture::GetActionIndexFromCode (gesture diag)\n");
+	org_RosaceResolve_diag = (unsigned int(__cdecl*)(int,int)) DetourFunction((PBYTE)(baseAddressAI + 0xE8070), (PBYTE)RosaceResolve_diag);
+	Log("Hooked sub_100E8070 rosace-resolve (gesture diag)\n");
+	org_UpdateMood_diag = (void(__fastcall*)(void*,void*)) DetourFunction((PBYTE)(baseAddressAI + 0x76E90), (PBYTE)UpdateMood_diag);
+	Log("Hooked AI_EntityPlayer::UpdateMood (gesture diag)\n");
+	org_GestureSetDword5CC_diag = (void(__fastcall*)(void*,void*)) DetourFunction((PBYTE)(baseAddressAI + 0xEC270), (PBYTE)GestureSetDword5CC_diag);
+	Log("Hooked sub_100EC270 dword5CC-setter (gesture diag)\n");
+}
+
+void DetourMoodFix()
+{
+	// Detour AI_EntityPlayer::UpdateAsyncLoadVisuals; on the load-complete (state==3) transition the
+	// hook clears prev-mood and re-fires UpdateMood so the rosace resolver populates dword5CC -> A-pose
+	// fixed. Hook body is integer-only (no logging / no FP) to avoid clobbering anim/weapon x87/SSE state.
+	org_UpdateAsyncLoadVisuals = (void(__fastcall*)(void*,void*)) DetourFunction((PBYTE)(baseAddressAI + 0xC9800), (PBYTE)UpdateAsyncLoadVisuals_moodfix);
+	Log("Hooked AI_EntityPlayer::UpdateAsyncLoadVisuals (A-pose mood fix)\n");
+}
+
+void DetourDeployDiag()
+{
+	// [FIRE] sub-diagnostic gate: enable the per-frame local-pawn weapon/ammo read in Spawn_deploydiag only
+	// when a "_firediag_" file exists (independent kill switch; delete it to drop just the [FIRE] read).
+	g_fireDiagOn = FileExists("_firediag_") ? 1 : 0;
+	if (g_fireDiagOn) Log("[FIRE] diag armed (_firediag_): logging local-pawn weapon component + clip rounds on change\n");
+	// Detour AI_EntityPlayerAbstract::Spawn (0x100D8C20) -- per-frame local-pawn spawn tick.
+	// The hook calls the original first, then (bracketed by _fxsave/_fxrstor) reads the
+	// deploy-ramp gate state with integer-only code and logs it ON CHANGE only. Reveals
+	// which of inpFocus / clientReady / deploy-delay is blocking SetAsSpawned.
+	org_Spawn_deploydiag = (SPAWN_FN) DetourFunction((PBYTE)(baseAddressAI + 0xD8C20), (PBYTE)Spawn_deploydiag);
+	Log("Hooked AI_EntityPlayerAbstract::Spawn (deploy-ramp diag)\n");
+	// Locomotion-bank diag: log whether banks 100-160 bind to the body GAO (ACT_bHasBankID @0x100629B0).
+	org_ACT_bHasBankID = (char(__cdecl*)(int,int)) DetourFunction((PBYTE)(baseAddressAI + 0x629B0), (PBYTE)ACT_bHasBankID_diag);
+	Log("Hooked AIDLL::ACT_bHasBankID (locomotion-bank diag)\n");
 }

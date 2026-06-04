@@ -38,8 +38,16 @@ namespace QuazalWV
                     break;
                 case 7:
                     reply = new RMCPacketResponseAMMGameClientService_GetActiveAMMPlaylists();
-                    // RDV_E_AMM_NOTIFICATION_SESSIONTAPPED
-                    NotificationQuene.AddNotification(new NotificationQueneEntry(client, 3000, 0, 1002, 1, 1, 1, 0, "7"));
+                    // REMOVED (2026-06-04): the spurious RDV_E_AMM_NOTIFICATION_SESSIONTAPPED ("session destroyed")
+                    // push that was fired 3000ms after the GetActiveAMMPlaylists *query*. It is a delayed server
+                    // push that RACES the client's lobby/FrontEnd init. Diagnosed end-to-end:
+                    //  - backend is healthy (STALLDIAG: every RMC handled; all responses delivered+ACK'd);
+                    //  - the client completes the full lobby-data load, then goes idle the instant this push lands,
+                    //    never issuing FetchNews -> StartAMMSearch (hangs at "loading lobby");
+                    //  - in the one working run the client reached FetchNews ~0.5s BEFORE this fired, so it won the
+                    //    race and proceeded. Matchmaking is started by the Play button (UI), not by this push, so
+                    //    the success path does NOT need it. Removing it eliminates the race.
+                    // NotificationQuene.AddNotification(new NotificationQueneEntry(client, 3000, 0, 1002, 1, 1, 1, 0, "7"));
                     RMC.SendResponseWithACK(client.udp, p, rmc, client, reply);
                     break;
                 default:

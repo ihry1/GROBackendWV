@@ -19,14 +19,15 @@ namespace QuazalWV
 
         public ClassInfo_Grenade(uint weaponID)
         {
+            // Real map keys required (see ClassInfo_Gun). Using verified weapon 1000 data so the
+            // slot-2 bag resolves and the spawn's weapon-load gate completes. memBufferSize is
+            // recomputed by the caller (OCP_PlayerEntity) from the actual payload length.
             memBufferSize = 50;
-            nbComponents = 9;       //database
-            componentListID = 1000; //database
+            componentIds = new List<uint>() { 1, 4, 5, 6, 7, 8, 9 };
+            nbComponents = (byte)componentIds.Count; // 7
+            componentListID = 1000;
             this.weaponID = weaponID;
-            oasisNameID = 70910;    //As val
-            componentIds = new List<uint>();
-
-            for (uint i = 1; i <= nbComponents; i++) componentIds.Add(i);
+            oasisNameID = 70870;
             someCount = 0;
         }
 

@@ -12,6 +12,27 @@ namespace QuazalWV
     public static class RMC
     {
         public const uint MaxRmcPayloadSize = 963;
+
+        // --- server->client sequence diagnostic (gated by a "_seqdiag_" file next to the server; OFF by default) ---
+        // Pure logging, NO behavior change. Writes seqdiag.txt so we can see the EXACT server->client seq
+        // stream (small request_seq+1 vs large seqCounterReliable vs notifications) during the lobby
+        // data-load and compare it to the early responses the client DOES accept.
+        private static int _seqDiag = -1;
+        private static readonly object _seqDiagLock = new object();
+        private static string SeqPath(string f) { try { return System.IO.Path.Combine(AppDomain.CurrentDomain.BaseDirectory, f); } catch { return f; } }
+        private static bool SeqDiagOn { get { if (_seqDiag < 0) { try { _seqDiag = File.Exists(SeqPath("_seqdiag_")) ? 1 : 0; } catch { _seqDiag = 0; } } return _seqDiag == 1; } }
+        private static void SeqLog(string s)
+        {
+            if (!SeqDiagOn) return;
+            try { lock (_seqDiagLock) File.AppendAllText(SeqPath("seqdiag.txt"), DateTime.Now.ToString("HH:mm:ss.fff") + " " + s + Environment.NewLine); } catch { }
+        }
+        private static string FlagStr(QPacket p)
+        {
+            StringBuilder sb = new StringBuilder();
+            foreach (QPacket.PACKETFLAG f in p.flags) { if (sb.Length > 0) sb.Append('|'); sb.Append(f.ToString().Replace("FLAG_", "")); }
+            return sb.ToString();
+        }
+
         public static void HandlePacket(UdpClient udp, QPacket p)
         {
             ClientInfo client = Global.GetClientByIDrecv(p.m_uiSignature);
@@ -61,6 +82,7 @@ namespace QuazalWV
             if (rmc.callID > client.callCounterRMC)
                 client.callCounterRMC = rmc.callID;
             WriteLog(1, "Received Request : " + rmc.ToString());
+            SeqLog("IN-REQ   " + rmc.proto + " cid=" + rmc.callID + " m=" + rmc.methodID + " seq=" + p.uiSeqId + " flags=[" + FlagStr(p) + "]");
             string payload = rmc.PayLoadToString();
             if (payload != "")
                 WriteLog(5, payload);
@@ -351,6 +373,7 @@ namespace QuazalWV
                 m_oDestinationVPort = p.m_oSourceVPort,
                 m_uiSignature = client.IDsend
             };
+            SeqLog("OUT-RESP " + rmc.proto + " cid=" + rmc.callID + " m=" + rmc.methodID + " err=" + error + " framedLen=" + m.Length + " reqseq=" + p.uiSeqId);
             MakeAndSend(client, np, m.ToArray());
         }
 
@@ -394,9 +417,16 @@ namespace QuazalWV
             MemoryStream m = new MemoryStream(data);
             if (data.Length < MaxRmcPayloadSize)
             {
+                // NOTE: do NOT blindly renumber this to seqCounterReliable / FLAG_RELIABLE.
+                // RMC correlation is by callID (userContextId), not packet seq; the seq is the
+                // PRUDP transport ORDER. Unifying small responses onto seqCounterReliable+RELIABLE
+                // broke login ordering (Core Timeout 0x8001000b). Capturing the real server->client
+                // seq stream (seqdiag) before re-attempting a fix.
+                ushort reqSeq = np.uiSeqId;
                 np.uiSeqId++;
                 np.payload = data;
                 np.payloadSize = (ushort)np.payload.Length;
+                SeqLog("  OUT-SMALL seq=" + np.uiSeqId + " (reqSeq=" + reqSeq + "+1) flags=[" + FlagStr(np) + "] size=" + np.payloadSize);
                 WriteLog(10, "sent packet");
                 Send(client.udp, np, client);
             }
@@ -424,6 +454,7 @@ namespace QuazalWV
                     m.Read(buff, 0, len);
                     np.payload = buff;
                     np.payloadSize = (ushort)np.payload.Length;
+                    SeqLog("  OUT-LARGE seq=" + np.uiSeqId + " (relCtr) part=" + np.m_byPartNumber + " flags=[" + FlagStr(np) + "] size=" + np.payloadSize);
                     Send(client.udp, np, client);
                     pos += len;
                 }

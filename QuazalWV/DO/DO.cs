@@ -100,6 +100,12 @@ namespace QuazalWV
                 case METHOD.CreateDuplicate:
                     replyPayload = DO_CreateDuplicaMessage.HandleMessage(client, data);
                     break;
+                // CreateAndPromoteDuplicate (0x13): intentionally NOT dispatched (reverted).
+                // Handling it (register + CallOutcome reply) was suspected of crashing the client
+                // during connect/session setup, since the server previously ignored 0x13 entirely.
+                // Left as the prior no-op (falls through to default, logged, no reply) pending a
+                // packet capture to confirm the response the client actually expects.
+                // Implementation preserved in RE/plan/05-createandpromote-duplica.md.
                 case METHOD.Delete:
                     replyPayload = DO_DeleteMessage.HandleMessage(client, data);
                     break;

@@ -24,10 +24,13 @@ namespace QuazalWV
             matrix[0] = 1;
             matrix[5] = 1;
             matrix[10] = 1;
-            //spawn position
-            matrix[12] = 0; //x
-            matrix[13] = 0; //y
-            matrix[14] = 0; //z
+            // Spawn transform: matrix is the 4x4 world transform; col3 (indices 12/13/14) = translation,
+            // verified vs game cObjectManager::SerializeOneEntity (RE/plan/03-spawn-replica-schema.md).
+            // Configure Global.spawn* to a real in-map coordinate so the player spawns in-bounds
+            // instead of at the world origin (0,0,0).
+            matrix[12] = Global.spawnX; //x
+            matrix[13] = Global.spawnY; //y
+            matrix[14] = Global.spawnZ; //z
             matrix[15] = 1;
             foreach (float f in matrix)
                 Helper.WriteFloat(m, f);

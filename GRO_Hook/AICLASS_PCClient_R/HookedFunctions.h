@@ -1,5 +1,6 @@
 #include "Header.h"
 #include "defines.h";
+#include <intrin.h>  // _ReturnAddress (GetStruct probe caller capture)
 char buffer[1024];
 char buffer2[1024];
 char buffer3[1024];
@@ -340,4 +341,576 @@ void __fastcall AI_EntityPlayer_UpdateWarning(void* THIS, void* EDX)
 		//StartThread(StepStepStep);
 	}
 	org_AI_EntityPlayer_UpdateWarning(THIS, EDX);
+}
+
+// --- ClassInfo wrapper-list diagnostics (installed only when a "_ci_diag_" file exists). ---
+// Logs every (pid,classId) STORE (DeserializeMemBuffers) and LOOKUP (GetEntryFromWrapperList ->
+// FOUND/NULL) so we can see whether the 0x271 create-blob seeds the entry the local pawn reads.
+char   (__fastcall* org_DeserializeMemBuffers_diag)(void*, int, int, int, void*);
+DWORD* (__thiscall* org_GetEntryFromWrapperList_diag)(void*, int*);
+
+char __fastcall DeserializeMemBuffers_diag(void* THIS, int a2, int pid, int classId, void* memBuff)
+{
+	sprintf(buffer, "[CI] STORE DeserializeMemBuffers   pid=0x%08X classId=0x%02X\n\0", pid, classId & 0xFF);
+	Log(buffer);
+	// Dump the raw ClassInfo-slot framing from the create blob at the current read cursor.
+	// cMemBuffer: Pos@+0x08, Size@+0x0C, inline data@+0x10. Shows [len0][payload0...][len1]...
+	// so the actual per-slot lengths are visible (slot0 @ off0, slot1 @ off len0+1, grenade slot2 ~off 84).
+	{
+		int p  = *(int*)((char*)memBuff + 0x08);
+		int sz = *(int*)((char*)memBuff + 0x0C);
+		char* data = (char*)memBuff + 0x10;
+		char hex[640]; hex[0] = 0;
+		for (int k = 0; k < 190 && k < sz; k++)               // dump from blob START so field markers can be matched
+			sprintf(hex + strlen(hex), "%02X ", (unsigned char)data[k]);
+		sprintf(buffer, "[CI] blob[0..190] Pos=%d Size=%d: %s\n\0", p, sz, hex);
+		Log(buffer);
+	}
+	return org_DeserializeMemBuffers_diag(THIS, a2, pid, classId, memBuff);
+}
+
+DWORD* __fastcall GetEntryFromWrapperList_diag(void* THIS, void* EDX, int* key)
+{
+	DWORD* result = org_GetEntryFromWrapperList_diag(THIS, key);
+	sprintf(buffer, "[CI] LOOKUP GetEntryFromWrapperList pid=0x%08X classId=0x%02X -> %s\n\0", key[0], key[1] & 0xFF, result ? "FOUND" : "NULL");
+	Log(buffer);
+	return result;
+}
+
+// --- cMemBuffer::GetStruct probe (cBuffer.cpp:20 "invalid size!"). Logs ONLY when a read would
+//     overrun: size>=0x1000 || Pos+size > Size. The buffer Size identifies the ClassInfo slot
+//     (Main/Pistol=41, Grenade=42, Armor=73, Helmet=4, Ability=101, Passive=17, Boost=13, Body=56);
+//     (Pos, size) pinpoints the overrunning field. cMemBuffer layout: Pos@+0x08, Size@+0x0C. ---
+int (__thiscall* org_GetStruct_diag)(void*, void*, int);
+
+int __fastcall GetStruct_diag(void* THIS, void* EDX, void* dst, int size)
+{
+	void* caller = _ReturnAddress();
+	int pos = *(int*)((char*)THIS + 0x08);
+	int sz  = *(int*)((char*)THIS + 0x0C);
+	if (sz == 544 && pos < 150)   // trace EVERY read of the 544B player-create blob pre-slot region to find which field is short
+	{
+		sprintf(buffer, "[GS] read Pos=%d size=%d\n\0", pos, size);
+		Log(buffer);
+	}
+	if (size >= 0x1000 || pos + size > sz)
+	{
+		sprintf(buffer, "[GS] INVALID size=%d Pos=%d Size=%d (over by %d) caller=0x%08X\n\0", size, pos, sz, (pos + size) - sz, (DWORD)caller);
+		Log(buffer);
+	}
+	return org_GetStruct_diag(THIS, dst, size);
+}
+
+// ============================================================================
+// GESTURE / MOOD / A-POSE DIAGNOSTICS  (installed only when a "_gesture_diag_" file exists)
+// ----------------------------------------------------------------------------
+// Goal: ground-truth WHY the in-match pawn is stuck in an A-pose and whether the
+// network Gesture cmd (Entity_Cmd 0x28/0x29) or the mood/rosace path is the real
+// driver of the active anim descriptor cGestureMix.dword5CC (@+0x5CC).
+//
+// Hooks (AICLASS RVAs off baseAddressAI, imagebase 0x10000000):
+//   0x0DD220 cGesture::GetActionIndexFromCode(this=ecx, animID)  -> logs *this (gesture code),
+//            animID, and result. The "Gesture(162) invalid user code(-1)" error is THIS func:
+//            field1=*this (code), field2=animID. Confirms the 0x28 path passes animID=-1.
+//   0x0E8070 sub_100E8070(rosace, gestureSet) [__cdecl] -> the rosace->gesture-descriptor resolver
+//            called from UpdateMood. Return 0 == gesture not loaded/not found. KEY TIMING PROBE:
+//            when does it START returning non-zero (== anim bank for that rosace is loaded)?
+//   0x076E90 AI_EntityPlayer::UpdateMood(this=ecx) -> logs m_Mood currValue(+? via field) & prev.
+//            Shows WHEN UpdateMood (re)fires and the mood delta it sees.
+//   0x0EC270 sub_100EC270(cGestureMix* this=ecx) -> the ONLY setter of dword5CC (from list2 head).
+//            Logs list2.lastIndex (V1: lastIndex@+4, entries@+0xC) and the dword5CC value it sets.
+//            dword5CC@+0x5CC ; list2@+0x650. This DIRECTLY observes the A-pose fix moment.
+// All hooks are read-only logging passthroughs.
+// ============================================================================
+unsigned short (__fastcall* org_GetActionIndexFromCode_diag)(void*, void*, int);
+unsigned int   (__cdecl*    org_RosaceResolve_diag)(int, int);
+void           (__fastcall* org_UpdateMood_diag)(void*, void*);
+void           (__fastcall* org_GestureSetDword5CC_diag)(void*, void*);
+
+unsigned short __fastcall GetActionIndexFromCode_diag(void* THIS, void* EDX, int animID)
+{
+	unsigned short res = org_GetActionIndexFromCode_diag(THIS, EDX, animID);
+	// cGesture sub-object: *this(u16)=gesture code, *((u8*)this+6)=range, this[1]=base list ptr
+	unsigned short code  = *(unsigned short*)THIS;
+	unsigned char  range = *((unsigned char*)THIS + 6);
+	sprintf(buffer, "[GES] GetActionIndexFromCode code=%u animID=%d range=%u -> %d%s\n\0",
+		code, animID, range, (short)res, (res == 0xFFFF) ? "  (NOT FOUND)" : "");
+	Log(buffer);
+	return res;
+}
+
+// counters so we can see the transition without flooding the log
+int g_rosace_lastResultZero = -1;
+unsigned int __cdecl RosaceResolve_diag(int rosace, int gestureSet)
+{
+	unsigned int res = org_RosaceResolve_diag(rosace, gestureSet);
+	// log every call during the interesting window; res==0 means the rosace's gesture isn't resolvable yet
+	sprintf(buffer, "[ROS] sub_100E8070 rosace=%d set=%d -> 0x%08X%s\n\0",
+		rosace, gestureSet, res, res ? "  (RESOLVED)" : "  (none/not-loaded)");
+	Log(buffer);
+	return res;
+}
+
+void __fastcall UpdateMood_diag(void* THIS, void* EDX)
+{
+	// m_Mood is a cReplicatedFlag (currValue is the bitmask). UpdateMood compares against the
+	// 'prev mood' stored at this[1].m_bReplicatePositionAndAngle. We can't trivially resolve those
+	// offsets from here without the full AI_EntityPlayer layout, so just log entry + return addr.
+	void* caller = _ReturnAddress();
+	sprintf(buffer, "[MOOD] UpdateMood ENTER this=0x%08X caller=0x%08X\n\0", (DWORD)THIS, (DWORD)caller);
+	Log(buffer);
+	org_UpdateMood_diag(THIS, EDX);
+	sprintf(buffer, "[MOOD] UpdateMood LEAVE\n\0");
+	Log(buffer);
+}
+
+void __fastcall GestureSetDword5CC_diag(void* THIS, void* EDX)
+{
+	DWORD before = *(DWORD*)((char*)THIS + 0x5CC);
+	int   l2cnt  = *(int*)((char*)THIS + 0x650 + 0x4);   // list2.lastIndex
+	org_GestureSetDword5CC_diag(THIS, EDX);
+	DWORD after  = *(DWORD*)((char*)THIS + 0x5CC);
+	if (before != after || after != 0)
+	{
+		sprintf(buffer, "[5CC] sub_100EC270 this=0x%08X list2.cnt=%d dword5CC: 0x%08X -> 0x%08X%s\n\0",
+			(DWORD)THIS, l2cnt, before, after, (before == 0 && after != 0) ? "  *** A-POSE FIXED ***" : "");
+		Log(buffer);
+	}
+}
+
+// ============================================================================
+// A-POSE MOOD FIX  (installed only when a "_moodfix_" file exists)  -- NON-DIAGNOSTIC
+// ----------------------------------------------------------------------------
+// Root cause (verified by RE + runtime capture): the active-anim descriptor
+// cGestureMix.dword5CC stays null because AI_EntityHuman::InitEntity fires
+// AI_EntityPlayer::UpdateMood at spawn, BEFORE the character's anim banks finish
+// async-loading. UpdateMood acts only on mood DELTAS (prev-mood @ this+0xDA8 vs
+// m_Mood.currValue @ this+0x824) and nothing re-fires it once the banks land, so the
+// rosace resolver (which only returns non-zero with banks loaded) is never re-run for
+// the already-set mood bits -> dword5CC never gets populated -> permanent A-pose.
+//
+// Fix: detour AI_EntityPlayer::UpdateAsyncLoadVisuals (0x100C9800). That function walks a
+// load-state field at this+0x1400 through 1 -> 2 -> 3 (3 == fully loaded; verified in
+// disasm: "mov dword ptr [esi+1400h], 3" at 0x100C9878). Its sole caller
+// (AI_EntityPlayer::Update @0x100D4298) stops calling it once the field == 3, so the 2->3
+// transition occurs exactly once per entity. On that transition we ZERO the prev-mood
+// field (this+0xDA8) and re-run UpdateMood: with prev==0 the whole m_Mood.currValue is
+// seen as a fresh "add" delta, so every set mood bit is re-resolved against the now-loaded
+// banks -> dword5CC populated -> A-pose fixed.
+//
+// CRITICAL FP/SSE SAFETY: this body is INTEGER-ONLY. No Log/sprintf/fopen/CRT, no float
+// or double ops, no std::. It only: calls the trampoline, reads an int, compares, writes a
+// zero, and makes one integer __thiscall. (Clobbering x87/SSE state inside the anim/weapon
+// hot path is what broke ADS/firing with the earlier diagnostic hook.) Both functions are
+// __thiscall on the SAME AI_EntityPlayer* (this in ecx); UpdateMood takes no stack args.
+//
+// Once-per-entity guard: a small static fixed-size array of already-handled `this`
+// pointers. This touches NO game memory (cannot corrupt entity/anim state) and is purely
+// integer compare/store. The 2->3 transition is already effectively single-shot (the caller
+// stops invoking us at ==3); the array is belt-and-suspenders against any re-entry and
+// caps total UpdateMood re-fires at one per distinct entity pointer.
+void (__fastcall* org_UpdateAsyncLoadVisuals)(void*, void*);
+
+#define MOODFIX_MAXENT 64
+static void* g_moodfix_handled[MOODFIX_MAXENT] = { 0 };
+static int   g_moodfix_count = 0;
+
+void __fastcall UpdateAsyncLoadVisuals_moodfix(void* THIS, void* EDX)
+{
+	// Run the original per-frame async-load tick first (this performs the 1->2 / 2->3 writes).
+	org_UpdateAsyncLoadVisuals(THIS, EDX);
+
+	// Load-state field @ this+0x1400; 3 == fully loaded (banks ready). Act only on completion.
+	if (*(DWORD*)((char*)THIS + 0x1400) != 3)
+		return;
+
+	// Once-per-entity guard (integer-only, no game memory touched).
+	for (int i = 0; i < g_moodfix_count; i++)
+		if (g_moodfix_handled[i] == THIS)
+			return;
+	if (g_moodfix_count < MOODFIX_MAXENT)
+		g_moodfix_handled[g_moodfix_count++] = THIS;
+
+	// Clear prev-mood (this+0xDA8) so UpdateMood treats the full current m_Mood as a fresh
+	// add-delta and re-resolves every mood bit against the now-loaded anim banks.
+	*(DWORD*)((char*)THIS + 0xDA8) = 0;
+
+	// AI_EntityPlayer::UpdateMood @0x10076E90 -- __thiscall(this), no stack args.
+	((void(__fastcall*)(void*, void*))(baseAddressAI + 0x76E90))(THIS, 0);
+}
+
+// ============================================================================
+// LOCOMOTION-BANK DIAGNOSTIC  (installed by DetourDeployDiag, gated "_deploydiag_")
+// ----------------------------------------------------------------------------
+// Hard test of "are the body's locomotion anim banks actually bound?". cGestureMix::SwapBankId
+// (@0x100EB070, from AI_EntityHuman_SetupGestureMixLocomotion at InitEntity) gates on
+// AIDLL::ACT_bHasBankID(gao, bankID) for bank ids 100/110/120/130/140/150/160. If the body GAO
+// lacks those banks at bind time, nothing binds -> rosace ACT layers 0-18 stay empty -> body
+// A-pose + ACT_vGetRefBoxLinearVelocity == 0 (no root motion). (Arm-IK is separate SKE joint
+// modifiers, so it keeps working -- exactly the dichotomy observed.) This hook reports, per
+// locomotion bank, the gao and whether ACT_bHasBankID says it's present, logged ON CHANGE so a
+// "0-at-bind-then-1-after-async-load" timing bug appears as two lines (0 then 1) and a permanent
+// absence appears as a single 0. __cdecl(gao,bankID)->char. FP-safe: integer/hex log only,
+// fxsave/fxrstor-bracketed; only the 7 locomotion bank ids are logged.
+char (__cdecl* org_ACT_bHasBankID)(int, int) = 0;
+__declspec(align(16)) static unsigned char g_bank_fxbuf[512];
+static int g_bank_last[7] = { -2, -2, -2, -2, -2, -2, -2 };   // -2 = not yet observed
+
+char __cdecl ACT_bHasBankID_diag(int gao, int bankID)
+{
+	char result = org_ACT_bHasBankID(gao, bankID);
+	int idx = -1;
+	switch (bankID)
+	{
+		case 100: idx = 0; break;
+		case 110: idx = 1; break;
+		case 120: idx = 2; break;
+		case 130: idx = 3; break;
+		case 140: idx = 4; break;
+		case 150: idx = 5; break;
+		case 160: idx = 6; break;
+	}
+	if (idx >= 0)
+	{
+		int r = (int)(unsigned char)result;
+		if (r != g_bank_last[idx])
+		{
+			g_bank_last[idx] = r;
+			_fxsave(g_bank_fxbuf);
+			sprintf(buffer, "[BANK] bankID=%d gao=0x%08X hasBank=%d\n\0", bankID, gao, r);
+			Log(buffer);
+			_fxrstor(g_bank_fxbuf);
+		}
+	}
+	return result;
+}
+
+// ============================================================================
+// LOCOMOTION-APPLY WALK VALIDATION  (installed ONLY when a "_walktest_" file exists; else Patch1)
+// ----------------------------------------------------------------------------
+// sub_100ECC30 @0x100ECC30 (__thiscall, this == cGestureMix) is the PER-FRAME driver that plays the
+// locomotion rosace clips onto the ACT anim layers (-> sub_100E8390 -> ACT_AnimLayer_PlayAction). Its
+// first act is `a4 = this->dword5CC[12]`, which null-derefs when dword5CC (+0x5CC) == 0 (the anim
+// init-ordering window before the rosace descriptor is populated). The OLD Patch1 "fixed" that crash by
+// writing a blunt `ret` (0xC3) at the function start -- which disabled ALL locomotion clip playback ->
+// permanent A-pose + zero root motion (THE entire walk bug).
+//
+// This guard instead runs the real function for EXACTLY ONE entity: the LOCAL player's pawn. playerAddress
+// (captured by the AI_EntityPlayer::UpdateWarning hook) IS the local controllable pawn; its cGestureMix is
+// *(playerAddress+0xF6C)+8 (manager @pawn+0xF6C, cGestureMix @manager+8, dword5CC @cGestureMix+0x5CC -- all
+// cross-checked vs the [VEL] diag's descriptor address *(pawn+0xF6C)+0x5D4 == cGestureMix+0x5CC, and vs
+// sub_100ECC30 reading dword5CC at its this+0x5CC). playerAddress stays 0 until the local pawn is live in a
+// match, so AT THE LOBBY/CHAR-SELECT this matches nothing -> every call is skipped (Patch1-equivalent) ->
+// it CANNOT crash login the way the old per-frame eStateID gate did (that gate evaluated a transiently-wrong
+// state during the lobby transition). _moodfix_ must be armed too: it populates dword5CC at visual-load-
+// complete (runtime descSeen=1 confirmed). Integer-only: no FP/CRT, so the original keeps its x87/SSE anim
+// state intact (no Heisenbug). This is a VALIDATION harness -- if the body walks, the root cause is proven
+// and the real fix moves server-side (spawn ordering), retiring both this and Patch1.
+char* (__fastcall* org_LocomotionApply)(void*, void*) = 0;
+
+char* __fastcall LocomotionApply_guard(void* THIS, void* EDX)
+{
+	if (THIS == 0 || *(DWORD*)((char*)THIS + 0x5CC) == 0)
+		return 0;                                   // null dword5CC -> the crash case Patch1 guarded
+	if (playerAddress == 0)
+		return 0;                                   // local pawn not live yet (lobby/menus) -> skip ALL (lobby-safe)
+	DWORD mgr = *(DWORD*)(playerAddress + 0xF6C);   // local pawn's gesture-mix manager
+	if (mgr == 0 || (void*)(mgr + 8) != THIS)
+		return 0;                                   // not the LOCAL player's cGestureMix (bots/dolls/menu) -> skip
+	return org_LocomotionApply(THIS, EDX);          // local player + descriptor set -> play locomotion clips (walk)
+}
+
+// ============================================================================
+// DEPLOY-RAMP DIAGNOSTIC  (installed only when a "_deploydiag_" file exists)
+// ----------------------------------------------------------------------------
+// Goal (ground-truth WHY the local pawn never gets input control): the deploy /
+// combat-input ramp in AI_EntityPlayerAbstract::Spawn (0x100D8C20) never reaches
+// threshold, so cGameStatsStore::SetAsSpawned + AI_NetworkManager::SetStateAndEndIfClient(4)
+// never fire and the player can't move/ADS/fire.
+//
+// RE of the ramp (imagebase 0x10000000, RVAs off baseAddressAI):
+//   v5 = bIsInLoopAdversarialState()   [cNetRulesManager.Instance+0xA8 == 4]
+//        && !bIsInWarmupState()        [matchSrv = NetRules+0x30C; matchSrv ? matchSrv+0x54==1 : 0]
+//        && (currentState[+0x15C]==2 || bIsClientReady())   [params bitfield14 & 0x2000]
+//   while v5: IncInputValue (0x100D58B0) ramps accumulator @this+0x1D0 by the frame
+//   delta -- BUT if AIDLL::INP_bInputHasFocus() (0x100D4A60) returns true it FORCES the
+//   accumulator to 0.0 every frame (fldz), so the ramp can never complete.
+//   SetAsSpawned fires when accumulator >= [GlobalGameplay::Get()->globals(+0x58) + 0x6C]
+//   (the deploy delay; written by the Zen IdleActivation script, can be garbage/NaN if
+//   that data bank didn't load) + float1CC(+0x1CC).
+//
+// This hook captures, ON CHANGE ONLY, for the local pawn:
+//   inpFocus  = INP_bInputHasFocus()        (suspect (b): ramp perpetually reset)
+//   clientRdy = bIsClientReady()            (suspect (a): 0x2000 not landing)
+//   v5        = recomputed ramp gate
+//   state     = currentState (+0x15C)
+//   accumBits = RAW 32-bit bits of accumulator (+0x1D0)   -- NOT loaded as float
+//   delayBits = RAW 32-bit bits of deploy delay [globals+0x6C] (suspect (c): NaN/huge)
+//   f1CCBits  = RAW 32-bit bits of float1CC (+0x1CC)
+//   reached   = integer proxy for "SetAsSpawned branch reached": for two NON-negative,
+//               non-NaN IEEE-754 floats, (accumBits >= delayBits) as unsigned ints is
+//               equivalent to (accum >= delay). Flagged INVALID if either looks like a
+//               NaN/Inf (exp all-ones) or has the sign bit set, so a bogus delay is obvious.
+//
+// CRITICAL FP/SSE SAFETY (this is what broke ADS/firing before):
+//   * The real Spawn trampoline runs FIRST and does all its own x87 work.
+//   * Everything the hook then does is bracketed by _fxsave/_fxrstor on a 16-byte-aligned
+//     buffer, so the FPU+SSE register file is byte-for-byte identical when the hook returns
+//     into the game. Inside that bracket the hook still only does INTEGER work plus two
+//     integer-returning game calls (bIsClientReady, INP_bInputHasFocus) and, rarely (on
+//     change), sprintf/Log. Floats are only ever read as raw DWORD bits -- never loaded
+//     into x87/SSE as floating point by our code.
+//   * No per-frame logging: a static snapshot of the tracked integers gates emission.
+// I/O note: bIsClientReady() itself emits one DBG_SendSessionLog line on the frames where
+// the networked player-params aren't available yet; that is the game's own log, fires at
+// most a handful of times before the server sets the bit, and is harmless.
+typedef int (__fastcall* SPAWN_FN)(void*, void*, float);
+SPAWN_FN org_Spawn_deploydiag = 0;
+
+// 16-byte-aligned FXSAVE area (512 bytes). __declspec(align) keeps it off the (possibly
+// misaligned) stack so fxsave/fxrstor never fault.
+__declspec(align(16)) static unsigned char g_dd_fxbuf[512];
+
+// previous-value tracker (all integers); -1/0 sentinels so the first observation prints.
+static int  g_dd_init      = 0;
+static int  g_dd_pInpFocus = -1;
+static int  g_dd_pClientRdy= -1;
+static int  g_dd_pV5       = -1;
+static int  g_dd_pState    = -1;
+static DWORD g_dd_pAccum   = 0xFFFFFFFF;
+static DWORD g_dd_pDelay   = 0xFFFFFFFF;
+static DWORD g_dd_pF1CC    = 0xFFFFFFFF;
+static int  g_dd_pReached  = -1;
+static int  g_dd_pInSeen   = -1;   // [INPUT] diag: 1 once the controllable pawn's input axes/magnitude are non-zero
+static int  g_dd_pMoveMode = -1;    // [VEL] diag: pawn move-mode byte (+0xDA0); 0 == velocity force-zeroed in Master
+static int  g_dd_pVelSeen  = -1;    // [VEL] diag: 1 once pawn velocity (+0x700) is non-zero
+static int  g_dd_pRbSeen   = -1;    // [VEL] diag: 1 once refBoxLinearVelocity (+0x6F4, walk root motion) is non-zero
+static int  g_dd_pDescSeen = -1;    // [VEL] diag: 1 once the locomotion rosace descriptor (*(pawn+0xF6C)+0x5D4) is non-null
+static int  g_dd_pLoadState= -1;    // [VEL] diag: pawn visual-load state (+0x1400); 3 == banks fully loaded (moodfix trigger)
+static int  g_dd_pRsSeen   = -1;    // [VEL] diag: 1 once PCSet_AnimationRosaceSpeed (+0x718, input->walk-blend speed) is non-zero
+// [FIRE] diag (gated by a "_firediag_" file; g_fireDiagOn set in DetourDeployDiag): WHY can't the player shoot?
+static int  g_fireDiagOn   = 0;     // 1 if "_firediag_" exists -> enable the [FIRE] read below (independent kill switch)
+static int  g_dd_pWpnNull  = -2;    // [FIRE] diag: 1 if GetWeaponComponent(pawn)==null (no weapon component -> can't fire)
+static int  g_dd_pRounds   = -2;    // [FIRE] diag: clip rounds = *(*(wpn+0x4EC)+8); 0 == ammo gate (bIsReadyToFire/bCanFire) fails -> can't fire
+
+// True if the raw IEEE-754 bits are a usable, comparable non-negative finite number
+// (sign clear, exponent not all-ones). Integer-only; does not load the value as a float.
+static int dd_isUsableNonNeg(DWORD bits)
+{
+	if (bits & 0x80000000u) return 0;            // negative
+	if ((bits & 0x7F800000u) == 0x7F800000u) return 0; // Inf or NaN
+	return 1;
+}
+
+int __fastcall Spawn_deploydiag(void* THIS, void* EDX, float dt)
+{
+	// 1) Run the real per-frame spawn tick first (full original behaviour + its own FP).
+	int result = org_Spawn_deploydiag(THIS, EDX, dt);
+
+	// 2) Only the local pawn runs the ramp (serializationFlags @ +0x30 & 1), matching the
+	//    original's own gate. Integer read; bail before touching the FPU otherwise.
+	if (THIS == 0 || (*(unsigned char*)((char*)THIS + 0x30) & 1) == 0)
+		return result;
+
+	// 3) Save the game's post-Spawn FPU+SSE state; restore on every return path below so
+	//    the register file we hand back is identical. Our diagnostic lives entirely inside.
+	_fxsave(g_dd_fxbuf);
+
+	char* p = (char*)THIS;
+
+	// --- gather (integer only) ---------------------------------------------------------
+	int state = *(int*)(p + 0x15C);
+
+	// loopAdv / warmup via direct memory reads (avoids the singleton Get() accessors, which
+	// __debugbreak if the instance is null). Mirror the exact field tests from the disasm.
+	int loopAdv = 0, warmup = 0;
+	DWORD netRules = *(DWORD*)(baseAddressAI + 0x6CC310);   // cNetRulesManager::Instance
+	if (netRules)
+	{
+		loopAdv = (*(int*)(netRules + 0xA8) == 4) ? 1 : 0;
+		DWORD matchSrv = *(DWORD*)(netRules + 0x30C);
+		warmup = (matchSrv && *(int*)(matchSrv + 0x54) == 1) ? 1 : 0;
+	}
+
+	// bIsClientReady(): __thiscall(this) -> al. Integer-only body (verified).
+	int clientRdy = ((char(__fastcall*)(void*, void*))(baseAddressAI + 0xD5A30))(THIS, 0) ? 1 : 0;
+
+	// AIDLL::INP_bInputHasFocus(): __cdecl -> al. No FP in its body (engine vtable bool).
+	int inpFocus = ((char(__cdecl*)(void))(baseAddressAI + 0xD4A60))() ? 1 : 0;
+
+	// recompute v5 exactly as Spawn does.
+	int v5 = (loopAdv && !warmup && (state == 2 || clientRdy)) ? 1 : 0;
+
+	// raw float bits (NEVER loaded as float by us).
+	DWORD accumBits = *(DWORD*)(p + 0x1D0);
+	DWORD f1CCBits  = *(DWORD*)(p + 0x1CC);
+
+	// deploy delay = [GlobalGameplay::Get()->globals(+0x58) + 0x6C], as RAW bits.
+	// GlobalGameplay::Get() (0x1020AF60) constructs the singleton on first use; it is
+	// integer-returning. Guard the chained pointer derefs.
+	DWORD delayBits = 0xFFFFFFFF;
+	DWORD ggGlobals = 0;
+	{
+		void* gg = ((void*(__cdecl*)(void))(baseAddressAI + 0x20AF60))();
+		if (gg)
+		{
+			ggGlobals = *(DWORD*)((char*)gg + 0x58);
+			if (ggGlobals)
+				delayBits = *(DWORD*)(ggGlobals + 0x6C);
+		}
+	}
+
+	// integer proxy for "SetAsSpawned branch reached": valid only for two usable
+	// non-negative finite floats. -1 == can't tell (delay/accum is NaN/Inf/negative).
+	// DEPLOY-FAST FIX: globals+0x6C ("IdleActivation") is the deploy threshold, stock 120.0s -- the idle
+	// auto-deploy fallback. The emulator never shows the deploy menu, so the player falls through to that
+	// 120s timer before the ramp grants control. Rewrite the known stock 120.0 to 0.5s for the local pawn
+	// so the deploy completes in <1s. Integer write (no FP), inside the fxsave/fxrstor bracket.
+	/* deploy-fast REVERTED: completing this ramp calls SetStateAndEndIfClient(4) = LaunchEndGameClient = ENDS THE MATCH (the kick) -- the ramp @0x100d8c20 is the idle match-end timer, NOT the deploy/control gate. Diag below stays. */
+
+	int reached;
+	if (dd_isUsableNonNeg(accumBits) && dd_isUsableNonNeg(delayBits))
+		reached = (accumBits >= delayBits) ? 1 : 0;
+	else
+		reached = -1;
+
+	// --- emit ONLY on change ------------------------------------------------------------
+	if (!g_dd_init
+		|| inpFocus  != g_dd_pInpFocus
+		|| clientRdy != g_dd_pClientRdy
+		|| v5        != g_dd_pV5
+		|| state     != g_dd_pState
+		|| accumBits != g_dd_pAccum
+		|| delayBits != g_dd_pDelay
+		|| f1CCBits  != g_dd_pF1CC
+		|| reached   != g_dd_pReached)
+	{
+		g_dd_init       = 1;
+		g_dd_pInpFocus  = inpFocus;
+		g_dd_pClientRdy = clientRdy;
+		g_dd_pV5        = v5;
+		g_dd_pState     = state;
+		g_dd_pAccum     = accumBits;
+		g_dd_pDelay     = delayBits;
+		g_dd_pF1CC      = f1CCBits;
+		g_dd_pReached   = reached;
+
+		// sprintf/Log use only integers and raw hex bits -- no %f, no float math.
+		sprintf(buffer,
+			"[DEPLOY] this=0x%08X state=%d v5=%d inpFocus=%d clientRdy=%d "
+			"loopAdv=%d warmup=%d accum=0x%08X delay=0x%08X f1CC=0x%08X reached=%d "
+			"ggGlobals=0x%08X\n\0",
+			(DWORD)THIS, state, v5, inpFocus, clientRdy,
+			loopAdv, warmup, accumBits, delayBits, f1CCBits, reached,
+			ggGlobals);
+		Log(buffer);
+	}
+
+	// --- INPUT diagnostic: is the controllable PAWN actually receiving input? ------------
+	// abstract->masterEntityPlayer (+0x18C) = the pawn (AI_EntityPlayer). The PC input poll
+	// (sub_100A7D20) writes the pawn's input axes at pawn+0x3EC/0x3F0 and the movement
+	// magnitude at pawn+0x464 (consumed by cActionSelectorPC::TryWalk). pad = *(pawn+0x3D0)
+	// is the bound pad GetPadInput reads. RAW integer bits only -- no float math. Emits when
+	// input is first seen / lost: if you HOLD W/A/S/D and no line with inSeen=1 ever appears,
+	// input is not reaching the pawn (focus / pad-binding / action-dispatch).
+	{
+		// Only at state 5 (Loop) is masterEntityPlayer (+0x18C) reliably the fully-built pawn;
+		// earlier (join/spawn) +0x18C may be 0 or uninitialized garbage, so dereferencing
+		// pawn+0x3EC then access-violates -> the crash-on-join. Gate on state==5 AND range-check
+		// the pawn pointer (plausible aligned user-mode address) before touching any pawn field.
+		DWORD pawn = (state == 5) ? *(DWORD*)(p + 0x18C) : 0;
+		DWORD inX = 0, inY = 0, inMag = 0, padPtr = 0;
+		if (pawn >= 0x00010000 && pawn < 0x7FFF0000 && (pawn & 3) == 0)
+		{
+			inX    = *(DWORD*)(pawn + 0x3EC);
+			inY    = *(DWORD*)(pawn + 0x3F0);
+			inMag  = *(DWORD*)(pawn + 0x464);
+			padPtr = *(DWORD*)(pawn + 0x3D0);
+
+			// VELOCITY-CHAIN DIAGNOSTIC (read-only; mood theory disproven -- m_Mood already = 3).
+			// Input reaches the pawn (inMag=1.0) but it doesn't move. AI_EntityHuman::Master
+			// @0x10086a60 sets velocity(+0x700) from refBoxLinearVelocity(+0x6F4 = the walk anim's
+			// ROOT MOTION), then a move-mode switch on byte +0xDA0 where case 0 FORCE-ZEROES
+			// velocity. So either move-mode==0 zeroes it, or refBox stays 0 (walk anim not
+			// playing). Log move-mode + whether velocity / root-motion ever go non-zero, on change.
+			DWORD velX = *(DWORD*)(pawn + 0x700);
+			DWORD rbX  = *(DWORD*)(pawn + 0x6F4);
+			DWORD rbY  = *(DWORD*)(pawn + 0x6F8);
+			int moveMode = *(unsigned char*)(pawn + 0xDA0);
+			// Rosace descriptor (subagent's root cause): cGestureMix.dword5CC = *(pawn+0xF6C)+0x5D4.
+			// NULL == no locomotion rosace installed == zero root motion. loadState (pawn+0x1400)==3
+			// means the anim banks finished loading -- exactly when the armed _moodfix_ hook re-fires
+			// UpdateMood. So if loadState reaches 3 but desc stays 0, the moodfix's UpdateMood is NOT
+			// installing the rosace (mood-bit/rosace mismatch or the hook isn't attached). Read-only.
+			int loadState = *(int*)(pawn + 0x1400);
+			DWORD gMgr = *(DWORD*)(pawn + 0xF6C);
+			DWORD desc = 0;
+			if (gMgr >= 0x00010000 && gMgr < 0x7FFF0000 && (gMgr & 3) == 0)
+				desc = *(DWORD*)(gMgr + 0x5D4);
+			// PCSet_AnimationRosaceSpeed (+0x718): the speed the input cursor is supposed to feed the
+			// walk rosace (set by UpdateAnimationRosaceSpeed from ProcessKeyboardInput). If this stays 0
+			// while a key is held (cursor mag +0x464 == 1.0), the input->locomotion link is GATED (e.g.
+			// player not in a fully-deployed/playable state) -- supports the "incomplete deploy" theory.
+			DWORD rsSpeed = *(DWORD*)(pawn + 0x718);
+			int velSeen  = (velX != 0) ? 1 : 0;
+			int rbSeen   = (rbX || rbY) ? 1 : 0;
+			int descSeen = (desc != 0) ? 1 : 0;
+			int rsSeen   = (rsSpeed != 0) ? 1 : 0;
+			if (moveMode != g_dd_pMoveMode || velSeen != g_dd_pVelSeen || rbSeen != g_dd_pRbSeen
+				|| descSeen != g_dd_pDescSeen || loadState != g_dd_pLoadState || rsSeen != g_dd_pRsSeen)
+			{
+				g_dd_pMoveMode  = moveMode;
+				g_dd_pVelSeen   = velSeen;
+				g_dd_pRbSeen    = rbSeen;
+				g_dd_pDescSeen  = descSeen;
+				g_dd_pLoadState = loadState;
+				g_dd_pRsSeen    = rsSeen;
+				sprintf(buffer,
+					"[VEL] loadState=%d moveMode=%d descSeen=%d rsSeen=%d rsSpeed=0x%08X rbSeen=%d velSeen=%d desc=0x%08X rbX=0x%08X\n\0",
+					loadState, moveMode, descSeen, rsSeen, rsSpeed, rbSeen, velSeen, desc, rbX);
+				Log(buffer);
+			}
+		}
+		// --- [FIRE] diagnostic: WHY can't the player shoot? Decisive gate = clip rounds (ammo). ----
+			// Gated by "_firediag_" (g_fireDiagOn). bIsReadyToFire @0x10076d00 AND bCanFire @0x10068890 both
+			// abort unless rounds = *(*(GetWeaponComponent(pawn)+0x4EC)+8) > 0 (clip rounds set by InitAmmoCounter
+			// from weapon property 43 = clip size). Provisioning audit: the equipped weapon (mapKey 170) is a
+			// degenerate DB row whose component modifier lists carry NO clip-size property -> clipSize 0 ->
+			// rounds 0 -> no shot. This settles it:  wpnNull=1 -> weapon component not built;  rounds=0 -> ammo
+			// gate is the blocker (fix weapon DB/loadout);  rounds>0 -> block is elsewhere (state/ADS/jump).
+			// GetWeaponComponent @0x1008bbf0 (__thiscall(pawn)) is a side-effect-free getter; called inside the
+			// existing fxsave bracket so any FP it touches is restored. pawn re-validated for safety.
+			if (g_fireDiagOn && pawn >= 0x00010000 && pawn < 0x7FFF0000 && (pawn & 3) == 0)
+			{
+				DWORD fwpn = ((DWORD(__fastcall*)(void*, void*))(baseAddressAI + 0x8BBF0))((void*)pawn, 0);
+				DWORD fammo = 0; int frounds = -1;
+				if (fwpn >= 0x00010000 && fwpn < 0x7FFF0000 && (fwpn & 3) == 0)
+				{
+					fammo = *(DWORD*)(fwpn + 0x4EC);
+					if (fammo >= 0x00010000 && fammo < 0x7FFF0000 && (fammo & 3) == 0)
+						frounds = (int)*(DWORD*)(fammo + 8);
+				}
+				int fwpnNull = (fwpn == 0) ? 1 : 0;
+				if (fwpnNull != g_dd_pWpnNull || frounds != g_dd_pRounds)
+				{
+					g_dd_pWpnNull = fwpnNull;
+					g_dd_pRounds  = frounds;
+					sprintf(buffer, "[FIRE] wpnNull=%d rounds=%d wpn=0x%08X ammoCtr=0x%08X\n\0", fwpnNull, frounds, fwpn, fammo);
+					Log(buffer);
+				}
+			}
+			int inSeen = (inX || inY || inMag) ? 1 : 0;
+		if (inSeen != g_dd_pInSeen)
+		{
+			g_dd_pInSeen = inSeen;
+			sprintf(buffer,
+				"[INPUT] pawn=0x%08X inSeen=%d inX=0x%08X inY=0x%08X inMag=0x%08X pad=0x%08X inpFocus=%d\n\0",
+				pawn, inSeen, inX, inY, inMag, padPtr, inpFocus);
+			Log(buffer);
+		}
+	}
+
+	// 4) Restore the saved FPU+SSE state -> byte-identical to post-trampoline.
+	_fxrstor(g_dd_fxbuf);
+	return result;
 }

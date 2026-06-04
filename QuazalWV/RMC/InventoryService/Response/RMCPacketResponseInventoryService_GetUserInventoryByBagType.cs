@@ -13,10 +13,10 @@ namespace QuazalWV
         public List<GR5_InventoryBag> bags = new List<GR5_InventoryBag>();
         public List<GR5_WeaponConfiguration> weaponConfig = new List<GR5_WeaponConfiguration>();
 
-        public RMCPacketResponseInventoryService_GetUserInventoryByBagType(byte bagType, byte offset)
+        public RMCPacketResponseInventoryService_GetUserInventoryByBagType(ClientInfo client, byte bagType, byte offset)
         {
-            items = DBHelper.GetUserItems(0x1234, (byte)(bagType + offset));
-            bags = DBHelper.GetInventoryBags(0x1234, (byte)(bagType + offset));
+            items = DBHelper.GetUserItems(client.PID, (byte)(bagType + offset));
+            bags = DBHelper.GetInventoryBags(client.PID, (byte)(bagType + offset));
             weaponConfig.Add(new GR5_WeaponConfiguration());
         }
 

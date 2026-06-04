@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.IO;
 using System.Collections.Generic;
 using System.Linq;
@@ -7,20 +7,21 @@ using System.Threading.Tasks;
 
 namespace QuazalWV
 {
+    // OCP_AbstractPlayerEntity — the abstract player create-replica (bank 0x2C, elem 0x15),
+    // i.e. the SaveTo blob parsed by AI_EntityPlayerAbstract::LoadFrom @ AICLASS 0x100d50e0.
+    //
+    // BYTE-EXACT layout per RE/plan/04 (SaveTo 0x100d51b0) confirmed against the read path.
+    // Endianness via QuazalWV.Helper INVERTED naming: *LE = BIG-endian, plain = LITTLE-endian.
+    // Block framing: [u8 size][u8 size2][size mask bytes], mask bit i==0 => field present.
+    //
+    // The pawn's ClassInfo is keyed by (pid, m_Class); m_Class here MUST match
+    // OCP_PlayerEntity.classID (both 0). m_SpawnBlockingReasons MUST be 0 (non-zero blocks deploy).
     public class OCP_AbstractPlayerEntity
     {
         public uint handle;
-        public byte unk1 = 0x55;
-        public byte[] unk2 = new byte[4];
-        public byte[] unk3 = new byte[4];
-        public byte unk4 = 0x66;
-        public byte[] unk5 = new byte[4];
-        public byte[] unk6 = new byte[4];
-        public byte playerLocalIndex = 0x0;
-        public byte padID = 0x0;
         public byte teamID = 0x1;
-        public uint rdvID = 0x1234;
-        public uint unk11 = 0x88888888;
+        public uint pid = 0x1234;
+        public uint dsGameMode = 0;
 
         public OCP_AbstractPlayerEntity(uint h)
         {
@@ -30,40 +31,42 @@ namespace QuazalWV
         public byte[] MakePayload()
         {
             MemoryStream m = new MemoryStream();
-            //Handle
-            Helper.WriteU32LE(m, handle);
-            //Replica Data 1
-            Helper.WriteU8(m, (byte)unk2.Length);
-            Helper.WriteU8(m, unk1);
-            m.Write(unk2, 0, unk2.Length);
-            //subStuff
-            Helper.WriteU32(m, 1); //m_DeathCount
-            Helper.WriteU32(m, 2); //m_AbilityInventoryId
-            Helper.WriteU32(m, 3); //m_PassiveAbilityInventoryId
-            Helper.WriteU32(m, 1000); //m_DesiredWeaponIds - main
-            Helper.WriteU32(m, 4); //m_DesiredWeaponIds - pistol
-            Helper.WriteU32(m, 4); //m_DesiredWeaponIds - grenade
-            Helper.WriteU32(m, 5); //m_AchievementPoints
-            Helper.WriteU32(m, 6); //m_HelmetInventoryId
-            Helper.WriteU32(m, 7); //m_ArmorTierInventoryId
-            Helper.WriteU16(m, 8); //m_SpawnBlockingReasons
-            Helper.WriteU8(m, 0);  //m_Class
-            Helper.WriteU16(m, 0); //m_ClassLevel
-            Helper.WriteU32(m, 0); //m_PortraitId
-            Helper.WriteU32(m, (uint)unk3.Length); //m_PersonaName
-            m.Write(unk3, 0, unk3.Length);         //m_PersonaName
 
-            //Replica Data 2
-            Helper.WriteU8(m, (byte)unk5.Length);
-            Helper.WriteU8(m, unk4);
-            m.Write(unk2, 0, unk5.Length);
-            //subStuff
-            //Rest
-            Helper.WriteU8(m, playerLocalIndex);
-            Helper.WriteU8(m, padID);
-            Helper.WriteU8(m, teamID);
-            Helper.WriteU32LE(m, rdvID);
-            Helper.WriteU32(m, unk11);
+            // ---- AI_Entity::LoadFrom : handle (u32 BE) ----
+            Helper.WriteU32LE(m, handle);
+
+            // ================= Block1 (serialStruct1) : 12 fields =================
+            // header: size=ceil(12/8)=2, size2=12, 2 zero mask bytes (all present)
+            Helper.WriteU8(m, 2);
+            Helper.WriteU8(m, 12);
+            m.Write(new byte[2], 0, 2);
+
+            Helper.WriteU32LE(m, 0);     //  1 m_DeathCount                u32 BE
+            Helper.WriteU32LE(m, 0);     //  2 m_AbilityInventoryId        u32 BE
+            Helper.WriteU32LE(m, 0);     //  3 m_PassiveAbilityInventoryId u32 BE
+            Helper.WriteU32LE(m, 0);     //  4 m_DesiredWeaponIds[Main]    u32 BE (3xU32)
+            Helper.WriteU32LE(m, 0);     //    m_DesiredWeaponIds[Pistol]  u32 BE
+            Helper.WriteU32LE(m, 0);     //    m_DesiredWeaponIds[Grenade] u32 BE
+            Helper.WriteU32LE(m, 0);     //  5 m_AchievementPoints         u32 BE
+            Helper.WriteU32LE(m, 0);     //  6 m_HelmetInventoryId         u32 BE
+            Helper.WriteU32LE(m, 0);     //  7 m_ArmorTierInventoryId      u32 BE
+            Helper.WriteU16LE(m, 0);     //  8 m_SpawnBlockingReasons      u16 BE =0 (deployable)
+            Helper.WriteU8(m, 0);        //  9 m_Class                     u8  =0
+            Helper.WriteU16LE(m, 0);     // 10 m_ClassLevel                u16 BE
+            Helper.WriteU32LE(m, 0);     // 11 m_PortraitId                u32 BE
+            Helper.WriteU32(m, 0);       // 12 m_PersonaName length        u32 LE (=0 -> empty)
+
+            // ================= Block2 (serialStruct2) : empty =================
+            Helper.WriteU8(m, 0);        // size  = 0
+            Helper.WriteU8(m, 0);        // size2 = 0
+
+            // ================= Abstract tail =================
+            Helper.WriteU8(m, 0);        // playerLocalIndex u8
+            Helper.WriteU8(m, 0);        // padID            u8
+            Helper.WriteU8(m, teamID);   // team             u8
+            Helper.WriteU32LE(m, pid);   // pid              u32 BE
+            Helper.WriteU32LE(m, dsGameMode); // ds_GameMode  u32 BE
+
             return m.ToArray();
         }
     }

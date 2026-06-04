@@ -1,51 +1,80 @@
-﻿*.swp
+## ============================================================
+##  Editor / OS cruft
+## ============================================================
+*.swp
 *.*~
-project.lock.json
 .DS_Store
 *.pyc
+project.lock.json
 nupkg/
 
 # Visual Studio Code
-.vscode
+.vscode/
 
-# Rider
-.idea
+# Rider / JetBrains
+.idea/
 
-# User-specific files
+## ============================================================
+##  Visual Studio per-developer state (never shared)
+## ============================================================
 *.suo
 *.user
 *.userosscache
 *.sln.docstates
+.vs/
+*.ipch
+*.cache
+*.resources
+*.dtbcache.json
+
+## ============================================================
+##  Build results
+##  Trailing-slash (no leading/mid slash) => match at ANY depth.
+##  The old "[Bb]in/*" / "[Rr]elease/*" forms were anchored to the
+##  repo root and missed nested QuazalWV/bin, GRO_Hook/Release, etc.
+## ============================================================
+[Dd]ebug/
+[Dd]ebugPublic/
+[Rr]elease/
+[Rr]eleases/
+[Bb]in/
+[Oo]bj/
+[Oo]ut/
+x64/
+x86/
+build/
+bld/
+packages/
+msbuild.log
+msbuild.err
+msbuild.wrn
+
+## ============================================================
+##  C/C++ (GRO_Hook) intermediate artifacts
+##  Caught by the build-dir rules above too, but listed by
+##  extension so stray copies outside Release/ are ignored.
+##  NOTE: vendored deps (detours.lib, root streams.exe) live
+##  OUTSIDE any build dir and use no blanket *.lib/*.exe rule,
+##  so they stay tracked on purpose.
+## ============================================================
+*.tlog
+*.pch
+*.exp
+*.ilk
+*.iobj
+*.ipdb
+*.recipe
+*.lastbuildstate
+*.CppClean.log
+
+## ============================================================
+##  Misc generated output (pre-existing project rules)
+## ============================================================
 *.pdb
 *.txt
 *.bin
 *.config
 !App.config
-*.ipch
-*.cache
-*.resources
-Be.Windows.Forms.HexBox/*
 
-# Build results
-[Dd]ebug/
-[Dd]ebugPublic/
-[Rr]elease/*
-[Rr]eleases/
-x64/
-x86/*
-build/
-bld/
-[Bb]in/*
-[Oo]bj/
-[Oo]ut/
-msbuild.log
-msbuild.err
-msbuild.wrn
-packages/*
-DDLParserWV/bin/*
-
-# Visual Studio 2015
-.vs/*
+# Third-party HexBox control: ignore its working copy
 Be.Windows.Forms.HexBox/*
-*.dtbcache.json
-*.tlog

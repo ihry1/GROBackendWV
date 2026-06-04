@@ -18,14 +18,21 @@ namespace QuazalWV
 
         public ClassInfo_Gun(uint weaponID )
         {
+            // bag.weaponID / componentListID / componentIds are MAP KEYS into the client's
+            // WeaponsModel (served by the emulator's WeaponService 0x6B from DB tables
+            // weapons/components/tempcomponentlists). They MUST be real or the async weapon
+            // load never resolves and the spawn stalls/crashes. Verified starter "Test" weapon,
+            // mapKey 1000 (in equipweaponids for all classes): compList 1000 = {1,4,5,6,7,8,9},
+            // oasisNameID 70870. compCount must be > 0 (hard gate in AsyncLoadOneAdvancedWeapon).
             memBufferSize = 0;
-            nbComponents = 9;       //database
-            componentListID = 1000; //database
-            this.weaponID = weaponID;//database
-            oasisNameID = 70910;    //As val
-            componentIds = new List<uint>();
-
-            for (uint i = 1; i <= nbComponents; i++) componentIds.Add(i);
+            // M27 D10RS (Assault default rifle): real rate-of-fire (weapon prop 41) + tracer-speed (prop 84)
+            // so tracers are fast/steady. The "Test" weapon 1000 (classType/weaponType 0) carries ~zero
+            // values -> sporadic & slow tracers. Internally-consistent triple in database.sqlite.
+            componentIds = new List<uint>() { 79, 171, 81, 82, 172, 84, 173, 86, 169 };
+            nbComponents = (byte)componentIds.Count; // 9
+            componentListID = 170;
+            this.weaponID = weaponID; // pass 170 (mapKey)
+            oasisNameID = 72925;
         }
 
         public byte[] MakePayload()

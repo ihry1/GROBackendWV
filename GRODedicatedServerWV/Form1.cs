@@ -24,6 +24,22 @@ namespace GRODedicatedServerWV
             toolStripComboBox1.SelectedIndex = 0;
         }
 
+        // Auto-start overload: launching with -autostart (or /autostart) on the command line
+        // fires the Start button once the window is shown (uses the default map key in the textbox).
+        public Form1(string[] args) : this()
+        {
+            if (args != null && args.Any(a =>
+                    a.Equals("-autostart", StringComparison.OrdinalIgnoreCase) ||
+                    a.Equals("/autostart", StringComparison.OrdinalIgnoreCase)))
+                this.Shown += Form1_AutoStart;
+        }
+
+        private void Form1_AutoStart(object sender, EventArgs e)
+        {
+            this.Shown -= Form1_AutoStart; // one-shot
+            toolStripButton1_Click(this, EventArgs.Empty);
+        }
+
         private void toolStripButton1_Click(object sender, EventArgs e)
         {
             uint mapKey = Convert.ToUInt32(toolStripTextBox2.Text, 16);

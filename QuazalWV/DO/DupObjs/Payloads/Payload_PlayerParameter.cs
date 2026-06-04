@@ -57,8 +57,8 @@ namespace QuazalWV
                     new BitFieldU32.BitFieldEntry(0, 7, "SpawnCount"),   //0
                     new BitFieldU32.BitFieldEntry(7, 1, "RequestSpawn"), //1
                     new BitFieldU32.BitFieldEntry(8, 4, "AMMStatus"),    //2
-                    new BitFieldU32.BitFieldEntry(12, 1, "ClientReady"), //3
-                    new BitFieldU32.BitFieldEntry(13, 1, "ServerReady"), //4
+                    new BitFieldU32.BitFieldEntry(12, 1, "ServerReady"), //3  bit 0x1000 = AI_EntityPlayerAbstract::bIsServerReady (AICLASS 0x100d5b10)
+                    new BitFieldU32.BitFieldEntry(13, 1, "ClientReady"), //4  bit 0x2000 = AI_EntityPlayerAbstract::bIsClientReady (AICLASS 0x100d5a30)
                     new BitFieldU32.BitFieldEntry(14, 18, "Reserved"),   //5
                 },
                 Helper.ReadU32(m)

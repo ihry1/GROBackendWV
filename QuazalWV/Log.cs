@@ -20,6 +20,8 @@ namespace QuazalWV
         public static StringBuilder logBuffer = new StringBuilder();
         public static List<byte[]> logPackets = new List<byte[]>();
         public static bool enablePacketLogging = true;
+        static int _uiPending = 0;                  // bounds the cross-thread UI append queue under flood (drop, don't block/OOM)
+        static volatile bool _saverStarted = false; // ONE persistent disk-saver thread (was spawned per-line -> thread exhaustion crash)
 
         public static void ClearLog()
         {
@@ -36,36 +38,61 @@ namespace QuazalWV
 
         public static void WriteLine(int priority, string s, object color = null)
         {
-            if (box == null) return;
+            string stamp = DateTime.Now.ToShortDateString() + " " + DateTime.Now.ToLongTimeString() + " : [" + priority.ToString("D2") + "]";
+            // Always buffer to the file log (lock-bounded, drained by the ONE persistent saver thread).
+            // Doing this off the UI thread means heavy "Log Packets" traffic can't stall or crash the UI.
+            lock (_sync)
+                logBuffer.Append(stamp + s + "\n");
+            EnsureSaver();
+
+            // UI append: priority-filtered, NON-blocking (BeginInvoke), flood-bounded, length-capped.
+            RichTextBox b = box;
+            if (b == null || priority > MinPriority)
+                return;
+            // Bound the pending cross-thread queue: under flood, drop UI updates (still file-logged) instead
+            // of blocking the caller (old box.Invoke) or letting the BeginInvoke queue grow unbounded -> OOM.
+            if (Interlocked.Increment(ref _uiPending) > 256)
+            {
+                Interlocked.Decrement(ref _uiPending);
+                return;
+            }
+            Color c = (color != null) ? (Color)color : (s.ToLower().Contains("error") ? Color.Red : Color.Black);
             try
             {
-                box.Invoke(new Action(delegate
+                b.BeginInvoke(new Action(delegate
                 {
-                    string stamp = DateTime.Now.ToShortDateString() + " " + DateTime.Now.ToLongTimeString() + " : [" + priority.ToString("D2") + "]";
-                    if (priority <= MinPriority)
+                    try
                     {
-                        Color c;
-                        if (color != null)
-                            c = (Color)color;
-                        else
-                            c = Color.Black;
-                        if (s.ToLower().Contains("error"))
-                            c = Color.Red;
-                        box.SelectionStart = box.TextLength;
-                        box.SelectionLength = 0;
-                        box.SelectionColor = c;
-                        box.AppendText(stamp + s + "\n");
-                        box.SelectionColor = box.ForeColor;
-                        box.ScrollToCaret();                        
+                        if (b.TextLength > 200000)   // cap the RichTextBox so it can't grow unbounded
+                            b.Clear();
+                        b.SelectionStart = b.TextLength;
+                        b.SelectionLength = 0;
+                        b.SelectionColor = c;
+                        b.AppendText(stamp + s + "\n");
+                        b.SelectionColor = b.ForeColor;
+                        b.ScrollToCaret();
                     }
-                    lock (_sync)
-                    {
-                        logBuffer.Append(stamp + s + "\n");
-                        new Thread(tSaveLog).Start();
-                    }
+                    catch { }
+                    finally { Interlocked.Decrement(ref _uiPending); }
                 }));
             }
-            catch { }
+            catch { Interlocked.Decrement(ref _uiPending); }
+        }
+
+        // Start the single background disk-saver exactly once (replaces the per-line thread spawn).
+        static void EnsureSaver()
+        {
+            if (_saverStarted)
+                return;
+            lock (_sync)
+            {
+                if (_saverStarted)
+                    return;
+                _saverStarted = true;
+                Thread t = new Thread(tSaveLog);
+                t.IsBackground = true;
+                t.Start();
+            }
         }
 
         public static string MakeDetailedPacketLog(byte[] data, bool isSinglePacket = false)
@@ -165,35 +192,48 @@ namespace QuazalWV
             }
         }
 
+        // Single persistent background saver: drains ALL pending log text + ALL pending packets each pass,
+        // then sleeps. Replaces the old one-shot-per-line spawn (which created a thread per log line and
+        // drained only one packet at a time -> thread exhaustion + backlog under "Log Packets").
         public static void tSaveLog(object obj)
         {
-            lock (_filesync)
+            while (true)
             {
-                string buffer = null;
-                lock (_sync)
+                try
                 {
-                    buffer = logBuffer.ToString();
-                    logBuffer.Clear();
-                }
-                if(buffer != null && buffer.Length > 0)
-                    File.AppendAllText(logFileName, buffer);
-                byte[] packet = null;
-                lock (_sync)
-                {
-                    if (logPackets.Count != 0)
+                    lock (_filesync)
                     {
-                        packet = logPackets[0];
-                        logPackets.RemoveAt(0);
+                        string buffer = null;
+                        lock (_sync)
+                        {
+                            buffer = logBuffer.ToString();
+                            logBuffer.Clear();
+                        }
+                        if (buffer != null && buffer.Length > 0)
+                            File.AppendAllText(logFileName, buffer);
+
+                        List<byte[]> pkts = null;
+                        lock (_sync)
+                        {
+                            if (logPackets.Count != 0)
+                            {
+                                pkts = logPackets;
+                                logPackets = new List<byte[]>();
+                            }
+                        }
+                        if (pkts != null && pkts.Count > 0)
+                        {
+                            using (FileStream fs = new FileStream(logPacketsFileName, FileMode.Append, FileAccess.Write))
+                            {
+                                foreach (byte[] packet in pkts)
+                                    fs.Write(packet, 0, packet.Length);
+                                fs.Flush();
+                            }
+                        }
                     }
                 }
-                if (packet != null)
-                {
-                    FileStream fs = new FileStream(logPacketsFileName, FileMode.Append, FileAccess.Write);
-                    fs.Write(packet, 0, packet.Length);
-                    fs.Flush();
-                    fs.Close();
-                }
-                Thread.Sleep(1);
+                catch { }
+                Thread.Sleep(50);
             }
         }
     }

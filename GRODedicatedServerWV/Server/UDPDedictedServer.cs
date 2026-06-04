@@ -39,6 +39,12 @@ namespace GRODedicatedServerWV
         {
             WriteLog(1, "Server started");
             listener = new UdpClient(listenPort);
+            // Disable the Windows UDP "connection reset" behavior. After we send to a client that has quit,
+            // the OS otherwise makes the NEXT Receive() throw SocketException 10054 (ConnectionReset) -- which
+            // would storm the catch below every iteration (and the old per-line logger turned that into a
+            // crash). SIO_UDP_CONNRESET (0x9800000C) suppresses it, so a client quitting before the server is
+            // stopped no longer crashes/spins the dedicated server.
+            try { listener.Client.IOControl(unchecked((int)0x9800000C), new byte[] { 0, 0, 0, 0 }, null); } catch { }
             IPEndPoint ep = new IPEndPoint(IPAddress.Any, 0);
             while (true)
             {
@@ -55,6 +61,7 @@ namespace GRODedicatedServerWV
                 catch (Exception ex)
                 {
                     WriteLog(1, "Server exception: " + ex.Message);
+                    Thread.Sleep(1);   // avoid a tight CPU/log spin if some exception recurs every iteration
                 }
             }
             WriteLog(1, "Server stopped");
