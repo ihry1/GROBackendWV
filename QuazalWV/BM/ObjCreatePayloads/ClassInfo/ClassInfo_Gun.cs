@@ -16,23 +16,32 @@ namespace QuazalWV
         uint oasisNameID;//4
         List<uint> componentIds;
 
-        public ClassInfo_Gun(uint weaponID )
+        public ClassInfo_Gun(uint weaponID)
         {
-            // bag.weaponID / componentListID / componentIds are MAP KEYS into the client's
-            // WeaponsModel (served by the emulator's WeaponService 0x6B from DB tables
-            // weapons/components/tempcomponentlists). They MUST be real or the async weapon
-            // load never resolves and the spawn stalls/crashes. Verified starter "Test" weapon,
-            // mapKey 1000 (in equipweaponids for all classes): compList 1000 = {1,4,5,6,7,8,9},
-            // oasisNameID 70870. compCount must be > 0 (hard gate in AsyncLoadOneAdvancedWeapon).
+            // STATIC per-weapon data — deliberately NO DB query. This constructor runs on the
+            // DEDICATED SERVER while building the spawn create-blob, and the DS process has an
+            // EMPTY database.sqlite (0 bytes). Any DB query here throws "no such table" and crashes
+            // the spawn -> client gets "lost connection to the game server". A real per-weapon lookup
+            // belongs on the backend via FetchSessionPlayerData, not in the DS create-blob path.
+            // bag.weaponID / componentListID / componentIds are MAP KEYS into the client's WeaponsModel
+            // (served by the backend's WeaponService 0x6B). componentListID == weapons.mapKey.
             memBufferSize = 0;
-            // M27 D10RS (Assault default rifle): real rate-of-fire (weapon prop 41) + tracer-speed (prop 84)
-            // so tracers are fast/steady. The "Test" weapon 1000 (classType/weaponType 0) carries ~zero
-            // values -> sporadic & slow tracers. Internally-consistent triple in database.sqlite.
-            componentIds = new List<uint>() { 79, 171, 81, 82, 172, 84, 173, 86, 169 };
-            nbComponents = (byte)componentIds.Count; // 9
-            componentListID = 170;
-            this.weaponID = weaponID; // pass 170 (mapKey)
-            oasisNameID = 72925;
+            this.weaponID = weaponID;
+            switch (weaponID)
+            {
+                case 339: // P250 (secondary pistol)
+                    componentListID = 339;
+                    oasisNameID = 70920;
+                    componentIds = new List<uint>() { 10414, 340, 10416 };
+                    break;
+                default:  // M27 D10RS (primary) + safe fallback for any other id
+                    this.weaponID = 170;
+                    componentListID = 170;
+                    oasisNameID = 72925;
+                    componentIds = new List<uint>() { 79, 171, 81, 82, 172, 84, 173, 86, 169 };
+                    break;
+            }
+            nbComponents = (byte)componentIds.Count;
         }
 
         public byte[] MakePayload()

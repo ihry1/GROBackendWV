@@ -692,6 +692,25 @@ static int  g_dd_pRsSeen   = -1;    // [VEL] diag: 1 once PCSet_AnimationRosaceS
 static int  g_fireDiagOn   = 0;     // 1 if "_firediag_" exists -> enable the [FIRE] read below (independent kill switch)
 static int  g_dd_pWpnNull  = -2;    // [FIRE] diag: 1 if GetWeaponComponent(pawn)==null (no weapon component -> can't fire)
 static int  g_dd_pRounds   = -2;    // [FIRE] diag: clip rounds = *(*(wpn+0x4EC)+8); 0 == ammo gate (bIsReadyToFire/bCanFire) fails -> can't fire
+static int  g_dd_pReady    = -1;    // [RDY] diag: bIsReadyToFire(pawn) -- 1=weapon reports ready (no-fire is upstream: trigger/intent), 0=a weapon readiness check fails. SAFE (no input-device access).
+static int  g_dd_pFirePresent = -2;  // [INTENT] diag: 1 if cActionFire is ordered (action-5 engaged at all)
+static int  g_dd_pFireCur     = -2;  // [INTENT] diag: actionFire[+0x40] this-frame fire intent (1=TryFire set it)
+static int  g_dd_pFirePrev    = -2;  // [INTENT] diag: actionFire[+0x3F] prev-frame fire intent
+static DWORD g_dd_pPadCtx = 0xFFFFFFFF;  // [TRIG] diag: player input-device context ptr = *(pawn+0x3D0)
+static int  g_dd_pPadCh   = -2;  // [TRIG] diag: pPadCtx->byte4 input channel (0xFF/255 = unassigned -> fire poll short-circuits to 0)
+static int  g_dd_pPadDis  = -2;  // [TRIG] diag: pPadCtx->byte13 disabled flag (!=0 -> fire poll returns 0)
+static int  g_dd_pGbusy   = -2;  // [GATE] diag: v14 reload/busy field pawn+0x3B8 (!=0 -> v13=0 -> no fire)
+static int  g_dd_pGb580   = -2;  // [GATE] diag: v14 busy predicate entity vtable+580 (1 -> v13=0 -> no fire)
+static int  g_dd_pGc572   = -2;  // [GATE] diag: cover gate entity vtable+572 (1 -> discharge skipped)
+static int  g_dd_pGc576   = -2;  // [GATE] diag: cover gate entity vtable+576 (1 -> discharge skipped)
+static int  g_dd_pGrate   = -2;  // [GATE] diag: rate/ready entity vtable+236 (0 -> discharge skipped)
+static int  g_dd_pGfm468  = -2;  // [GATE] diag: fire-mode wpn+0x468 (v12 blocks iff !=0 AND fm464==3)
+static int  g_dd_pGfm464  = -2;  // [GATE] diag: fire-mode wpn+0x464 fireModeCompId
+static int  g_dd_pSerFlags = -2;  // [SHOT] diag: serializationFlags byte pawn+0x30 (bit0 = local-player; gates SetShootingReplData's body)
+static int  g_dd_pShotEver = 0;   // [SHOT] diag: sticky -- 1 once pawn+0x274 (post-vtable+228 'shot fired' flag) is ever seen set (discharge reached)
+static int  g_dd_pShotLogd = -2;  // [SHOT] diag: last-logged g_dd_pShotEver
+static int  g_dd_pOHandle = -2;  // [OWN] diag: weapon ownerEntityHandle (weapon+0x24); ctor zeroes it, set to the pawn during equip/build
+static int  g_dd_pOGot    = -2;  // [OWN] diag: GetOwnerEntityPawn(weapon)!=0 (bCanFire's hard owner gate; 0 = no owner -> no shot)
 
 // True if the raw IEEE-754 bits are a usable, comparable non-negative finite number
 // (sign clear, exponent not all-ones). Integer-only; does not load the value as a float.
@@ -899,7 +918,122 @@ int __fastcall Spawn_deploydiag(void* THIS, void* EDX, float dt)
 					Log(buffer);
 				}
 			}
-			int inSeen = (inX || inY || inMag) ? 1 : 0;
+			// [RDY] weapon-side fire-readiness -- SAFE (no input-device access; the old [ACT] pad probe crashed at spawn).
+				// bIsReadyToFire(pawn) @0x10076d00: 1=weapon reports ready (a no-fire is then upstream); 0=a weapon readiness check fails.
+				if (g_fireDiagOn && pawn >= 0x00010000 && pawn < 0x7FFF0000 && (pawn & 3) == 0)
+				{
+					int rdy = ((char(__fastcall*)(void*, void*))(baseAddressAI + 0x76D00))((void*)pawn, 0) ? 1 : 0;
+					if (rdy != g_dd_pReady)
+					{
+						g_dd_pReady = rdy;
+						sprintf(buffer, "[RDY] bIsReadyToFire=%d\n\0", rdy);
+						Log(buffer);
+					}
+				}
+				// [INTENT] fire-intent flag: actionFire[+0x40] (cur) / [+0x3F] (prev) via pawn+0x2C8 -> GetAction::cActionFire (RVA 0x9BFF0).
+				// present=0: action-5 never ordered (trigger/binding/pad side). cur/prev stuck 0 while clicking: a TryFire predicate/poll fails.
+				// cur or prev ever 1 while clicking: intent IS set -> blocker is downstream in the executor (vtable[228] discharge). Field reads only; crash-safe.
+				if (g_fireDiagOn && pawn >= 0x00010000 && pawn < 0x7FFF0000 && (pawn & 3) == 0)
+				{
+					DWORD aFire = ((DWORD(__fastcall*)(void*, void*))(baseAddressAI + 0x9BFF0))((void*)(pawn + 0x2C8), 0);
+					int present = (aFire != 0) ? 1 : 0;
+					int icur = -1, iprev = -1;
+					if (aFire >= 0x00010000 && aFire < 0x7FFF0000 && (aFire & 3) == 0)
+					{
+						icur  = *(unsigned char*)(aFire + 0x40);
+						iprev = *(unsigned char*)(aFire + 0x3F);
+					}
+					if (present != g_dd_pFirePresent || icur != g_dd_pFireCur || iprev != g_dd_pFirePrev)
+					{
+						g_dd_pFirePresent = present;
+						g_dd_pFireCur = icur;
+						g_dd_pFirePrev = iprev;
+						sprintf(buffer, "[INTENT] aFire=0x%08X present=%d cur=%d prev=%d\n\0", aFire, present, icur, iprev);
+						Log(buffer);
+					}
+				}
+				// [TRIG] fire-trigger input-context gate -- SAFE field reads only (no device call). pPadCtx = *(pawn+0x3D0).
+				// IsKeyPressed(pPadCtx,5) (the action-5/fire poll) returns 0 BEFORE reading the device if channel(byte4)==0xFF (no device assigned) or disabled(byte13)!=0.
+				if (g_fireDiagOn && pawn >= 0x00010000 && pawn < 0x7FFF0000 && (pawn & 3) == 0)
+				{
+					DWORD pPadCtx = *(DWORD*)(pawn + 0x3D0);
+					int ch = -1, dis = -1;
+					if (pPadCtx >= 0x00010000 && pPadCtx < 0x7FFF0000 && (pPadCtx & 3) == 0)
+					{
+						ch  = *(unsigned char*)(pPadCtx + 4);
+						dis = *(unsigned char*)(pPadCtx + 0xD);
+					}
+					if (pPadCtx != g_dd_pPadCtx || ch != g_dd_pPadCh || dis != g_dd_pPadDis)
+					{
+						g_dd_pPadCtx = pPadCtx;
+						g_dd_pPadCh = ch;
+						g_dd_pPadDis = dis;
+						sprintf(buffer, "[TRIG] pPadCtx=0x%08X channel=%d (0xFF/255=unassigned) disabled=%d\n\0", pPadCtx, ch, dis);
+						Log(buffer);
+					}
+				}
+				// [GATE] cActionFire::UpdateInternal discharge gates -- WHY no fire despite intent set. entity==pawn (GetWeaponComponent is called on pawn).
+				// discharge (weapon vtable+228) needs ALL: !v14(busy: pawn+0x3B8 || pawn.vtable+580) && !cover(pawn.vtable+572/+576) && rate(pawn.vtable+236) && v12(NOT(wpn+0x468!=0 && wpn+0x464==3)).
+				// vtable predicates called exactly like the [RDY] bIsReadyToFire read; pawn validated; inside the fxsave bracket.
+				if (g_fireDiagOn && pawn >= 0x00010000 && pawn < 0x7FFF0000 && (pawn & 3) == 0)
+				{
+					DWORD gev = *(DWORD*)pawn;
+					DWORD gwpn = ((DWORD(__fastcall*)(void*, void*))(baseAddressAI + 0x8BBF0))((void*)pawn, 0);
+					int gbusy238 = (*(DWORD*)(pawn + 0x3B8)) ? 1 : 0;
+					int gb580 = -1, gc572 = -1, gc576 = -1, grate = -1;
+					if (gev >= 0x00010000 && gev < 0x7FFF0000 && (gev & 3) == 0)
+					{
+						gb580 = ((char(__fastcall*)(void*, void*))(*(DWORD*)(gev + 580)))((void*)pawn, 0) ? 1 : 0;
+						gc572 = ((char(__fastcall*)(void*, void*))(*(DWORD*)(gev + 572)))((void*)pawn, 0) ? 1 : 0;
+						gc576 = ((char(__fastcall*)(void*, void*))(*(DWORD*)(gev + 576)))((void*)pawn, 0) ? 1 : 0;
+						grate = ((char(__fastcall*)(void*, void*))(*(DWORD*)(gev + 236)))((void*)pawn, 0) ? 1 : 0;
+					}
+					int gfm468 = -1, gfm464 = -1;
+					if (gwpn >= 0x00010000 && gwpn < 0x7FFF0000 && (gwpn & 3) == 0)
+					{
+						gfm468 = *(unsigned char*)(gwpn + 0x468);
+						gfm464 = (int)*(DWORD*)(gwpn + 0x464);
+					}
+					if (gbusy238 != g_dd_pGbusy || gb580 != g_dd_pGb580 || gc572 != g_dd_pGc572 || gc576 != g_dd_pGc576 || grate != g_dd_pGrate || gfm468 != g_dd_pGfm468 || gfm464 != g_dd_pGfm464)
+					{
+						g_dd_pGbusy = gbusy238; g_dd_pGb580 = gb580; g_dd_pGc572 = gc572; g_dd_pGc576 = gc576; g_dd_pGrate = grate; g_dd_pGfm468 = gfm468; g_dd_pGfm464 = gfm464;
+						sprintf(buffer, "[GATE] busy238=%d busy580=%d cover572=%d cover576=%d rate236=%d fm468=%d fm464=%d\n\0", gbusy238, gb580, gc572, gc576, grate, gfm468, gfm464);
+						Log(buffer);
+					}
+				}
+				// [SHOT] confirm the discharge actually executes + read the SetShootingReplData gate directly.
+				// serializationFlags=pawn+0x30 (bit0 = local-player; gates the fire-replication body). pawn+0x274 is set to 1
+				// right after the vtable+228 (SetShootingReplData) discharge -> sticky 'dischargeEverReached' = is the fire call even reached.
+				if (g_fireDiagOn && pawn >= 0x00010000 && pawn < 0x7FFF0000 && (pawn & 3) == 0)
+				{
+					int serFlags = (int)(*(unsigned char*)(pawn + 0x30));
+					if (*(unsigned char*)(pawn + 0x274)) g_dd_pShotEver = 1;
+					if (serFlags != g_dd_pSerFlags || g_dd_pShotEver != g_dd_pShotLogd)
+					{
+						g_dd_pSerFlags = serFlags; g_dd_pShotLogd = g_dd_pShotEver;
+						sprintf(buffer, "[SHOT] serFlags=0x%02X bit0=%d dischargeEverReached=%d\n\0", serFlags, serFlags & 1, g_dd_pShotEver);
+						Log(buffer);
+					}
+				}
+				// [OWN] weapon owner gate -- bCanFire(1) HARD-requires GetOwnerEntityPawn(weapon) != 0. weapon+0x24 = ownerEntityHandle (ctor zeroes it; set to the pawn during equip/build).
+				// GetOwnerEntityPawn @0x10065FE0 is read-only (resolves the handle via cEntityManager + requires a pawn subclass). getOwnerPawn=0 => bCanFire aborts EVERY shot.
+				if (g_fireDiagOn && pawn >= 0x00010000 && pawn < 0x7FFF0000 && (pawn & 3) == 0)
+				{
+					DWORD owpn = ((DWORD(__fastcall*)(void*, void*))(baseAddressAI + 0x8BBF0))((void*)pawn, 0);
+					int ohandle = 0, ogot = -1;
+					if (owpn >= 0x00010000 && owpn < 0x7FFF0000 && (owpn & 3) == 0)
+					{
+						ohandle = (int)*(DWORD*)(owpn + 0x24);
+						ogot = ((DWORD(__fastcall*)(void*, void*))(baseAddressAI + 0x65FE0))((void*)owpn, 0) ? 1 : 0;
+					}
+					if (ohandle != g_dd_pOHandle || ogot != g_dd_pOGot)
+					{
+						g_dd_pOHandle = ohandle; g_dd_pOGot = ogot;
+						sprintf(buffer, "[OWN] ownerHandle=0x%08X getOwnerPawn=%d (bCanFire needs getOwnerPawn=1)\n\0", ohandle, ogot);
+						Log(buffer);
+					}
+				}
+				int inSeen = (inX || inY || inMag) ? 1 : 0;
 		if (inSeen != g_dd_pInSeen)
 		{
 			g_dd_pInSeen = inSeen;

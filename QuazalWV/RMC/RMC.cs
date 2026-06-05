@@ -456,6 +456,11 @@ namespace QuazalWV
                     np.payloadSize = (ushort)np.payload.Length;
                     SeqLog("  OUT-LARGE seq=" + np.uiSeqId + " (relCtr) part=" + np.m_byPartNumber + " flags=[" + FlagStr(np) + "] size=" + np.payloadSize);
                     Send(client.udp, np, client);
+                    // PACE the fragment burst: the client drops back-to-back UDP fragments when the
+                    // server sends them too fast (lobby fails MORE with free RAM = faster server), and
+                    // there is no retransmit -> the client stalls forever waiting on the lost fragment
+                    // ("loading lobby"). A small gap lets the client receive/reassemble each fragment.
+                    System.Threading.Thread.Sleep(5);
                     pos += len;
                 }
                 WriteLog(10, "sent packets");

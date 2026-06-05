@@ -60,6 +60,7 @@ namespace QuazalWV
         public byte classID = 0;
         public float Health = 100f;
         public uint mainWeaponID = 170;  // M27 D10RS (Assault default rifle) — real RoF/tracer props; "Test" 1000 had ~zero -> sporadic/slow tracers
+        public uint pistolWeaponID = 339; // P250 (secondary). Was reusing mainWeaponID, so both slots were the M27.
 
         public OCP_PlayerEntity(uint h)
         {
@@ -155,7 +156,7 @@ namespace QuazalWV
                         break;
 
                     case ClassInfoMemBuffer.ePistol:
-                        ClassInfo_Gun pistolInfo = new ClassInfo_Gun(mainWeaponID);
+                        ClassInfo_Gun pistolInfo = new ClassInfo_Gun(pistolWeaponID);
                         pistolInfo.memBufferSize = Convert.ToByte(pistolInfo.MakePayload().Length - 1);
                         buffer = pistolInfo.MakePayload();
                         m.Write(buffer, 0, buffer.Length);

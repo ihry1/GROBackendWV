@@ -203,6 +203,79 @@ namespace QuazalWV
             return result;
         }
 
+        // Returns ALL of a persona's items regardless of itemtype, with the REAL itemtype read
+        // from the DB row (entry[3]). GetUserInventoryByBagType uses this so every loadout-bag
+        // slot's InventoryID can be resolved by the client (weapons are itemtype 2, armor 8, etc.
+        // -- the old per-itemtype filter could only ever return one category at a time).
+        public static List<GR5_UserItem> GetAllUserItems(uint pid)
+        {
+            List<GR5_UserItem> result = new List<GR5_UserItem>();
+            List<List<string>> results = GetQueryResults("SELECT * FROM useritems WHERE pid=" + pid);
+            foreach (List<string> entry in results)
+            {
+                GR5_UserItem item = new GR5_UserItem();
+                item.InventoryID = Convert.ToUInt32(entry[1]);
+                item.PersonaID = pid;
+                item.ItemType = Convert.ToByte(entry[3]);
+                item.ItemID = Convert.ToUInt32(entry[4]);
+                item.OasisName = Convert.ToUInt32(entry[5]);
+                item.IGCPrice = Convert.ToUInt32(entry[6]);
+                item.GRCashPrice = Convert.ToUInt32(entry[7]);
+                result.Add(item);
+            }
+            return result;
+        }
+
+        // Returns ALL of a persona's inventory bags (general + loadout bags), each with its real
+        // bagtype and its slots. Used so the client receives every bag at once.
+        public static List<GR5_InventoryBag> GetAllInventoryBags(uint pid)
+        {
+            List<GR5_InventoryBag> result = new List<GR5_InventoryBag>();
+            List<int> bagIDs = new List<int>();
+            List<uint> bagTypes = new List<uint>();
+            List<List<string>> results = GetQueryResults("SELECT * FROM inventorybags WHERE pid=" + pid);
+            foreach (List<string> entry in results)
+            {
+                bagIDs.Add(Convert.ToInt32(entry[0]));
+                bagTypes.Add(Convert.ToUInt32(entry[2]));
+            }
+            for (int i = 0; i < bagIDs.Count; i++)
+            {
+                GR5_InventoryBag bag = new GR5_InventoryBag();
+                bag.m_PersonaID = pid;
+                bag.m_InventoryBagType = bagTypes[i];
+                bag.m_InventoryBagSlotVector = new List<GR5_InventoryBagSlot>();
+                List<List<string>> slotResults = GetQueryResults("SELECT * FROM inventorybagslots WHERE bagid=" + bagIDs[i]);
+                foreach (List<string> entry in slotResults)
+                {
+                    GR5_InventoryBagSlot slot = new GR5_InventoryBagSlot();
+                    slot.InventoryID = Convert.ToUInt32(entry[2]);
+                    slot.SlotID = Convert.ToUInt32(entry[3]);
+                    slot.Durability = Convert.ToUInt32(entry[4]);
+                    bag.m_InventoryBagSlotVector.Add(slot);
+                }
+                result.Add(bag);
+            }
+            return result;
+        }
+
+        // Component map-key list for a weapon, by its weapons.mapKey (== componentListID).
+        // Lets the spawn create-blob build each weapon's real component set instead of a hardcoded M27.
+        public static List<uint> GetWeaponComponentList(uint mapKey)
+        {
+            List<uint> result = new List<uint>();
+            foreach (List<string> e in GetQueryResults("SELECT value FROM tempcomponentlists WHERE key=" + mapKey))
+                result.Add(Convert.ToUInt32(e[0]));
+            return result;
+        }
+
+        // Oasis localization name id for an item/weapon, by templateitems.iid (== weapon mapKey).
+        public static uint GetItemOasisName(uint iid)
+        {
+            List<List<string>> r = GetQueryResults("SELECT oname FROM templateitems WHERE iid=" + iid);
+            return r.Count > 0 ? Convert.ToUInt32(r[0][0]) : 0;
+        }
+
         public static List<GR5_Ability> GetAbilities()
         {
             List<GR5_Ability> result = new List<GR5_Ability>();

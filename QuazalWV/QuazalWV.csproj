@@ -302,6 +302,14 @@
     <Compile Include="RMC\InventoryService\Response\RMCPacketResponseInventoryService_GetUserInventoryByBagType.cs" />
     <Compile Include="RMC\InventoryService\Response\RMCPacketResponseInventoryService_GetAllBoosts.cs" />
     <Compile Include="RMC\InventoryService\Response\RMCPacketResponseInventoryService_GetAllConsumables.cs" />
+    <Compile Include="RMC\InventoryService\Response\RMCPacketResponseInventoryService_FullUserInventory.cs" />
+    <Compile Include="RMC\InventoryService\Response\RMCPacketResponseInventoryService_GetPersonaInventoryWithAddOns.cs" />
+    <Compile Include="RMC\InventoryService\Response\RMCPacketResponseInventoryService_EquipLoadout.cs" />
+    <Compile Include="RMC\InventoryService\Response\RMCPacketResponseInventoryService_ReduceInventoryDurability.cs" />
+    <Compile Include="RMC\InventoryService\Response\RMCPacketResponseInventoryService_ExpireItems.cs" />
+    <Compile Include="RMC\InventoryService\Response\RMCPacketResponseInventoryService_RetrieveInventoryFromMailBag.cs" />
+    <Compile Include="RMC\InventoryService\Response\RMCPacketResponseInventoryService_BuyBackUserItem.cs" />
+    <Compile Include="RMC\InventoryService\Response\RMCPacketResponseInventoryService_UpdateLobbyInventoryBag.cs" />
     <Compile Include="RMC\LeaderboardService\LeaderboardService.cs" />
     <Compile Include="RMC\LeaderboardService\Response\RMCPacketResponseLeaderboardService_GetLeaderboards.cs" />
     <Compile Include="RMC\LeaderboardService\Response\RMCPacketResponseLeaderboardService_ReadLeaderBoardStatsNearUser.cs" />

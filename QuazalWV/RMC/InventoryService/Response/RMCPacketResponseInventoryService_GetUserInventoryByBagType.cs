@@ -13,11 +13,25 @@ namespace QuazalWV
         public List<GR5_InventoryBag> bags = new List<GR5_InventoryBag>();
         public List<GR5_WeaponConfiguration> weaponConfig = new List<GR5_WeaponConfiguration>();
 
-        public RMCPacketResponseInventoryService_GetUserInventoryByBagType(ClientInfo client, byte bagType, byte offset)
+        public RMCPacketResponseInventoryService_GetUserInventoryByBagType(ClientInfo client)
         {
-            items = DBHelper.GetUserItems(client.PID, (byte)(bagType + offset));
-            bags = DBHelper.GetInventoryBags(client.PID, (byte)(bagType + offset));
-            weaponConfig.Add(new GR5_WeaponConfiguration());
+            // Return the FULL inventory (all items + all bags) so EVERY loadout-bag slot's
+            // InventoryID resolves on the client. The old code filtered useritems by
+            // itemtype == bagType (conflating item-type with bag-type) AND parsed the bag type
+            // from raw payload byte offsets, so weapons (itemtype 2) were never returned for a
+            // loadout-bag (bagtype 4/5/6) request -> weapon slots had no resolvable item ->
+            // spinning/loading weapon icons + empty inventory.
+            items = DBHelper.GetAllUserItems(client.PID);
+            bags = DBHelper.GetAllInventoryBags(client.PID);
+            // Populate weaponConfigurations: the per-USER weapon component-list map. The inventory
+            // weapon tile resolves its (otherwise endlessly spinning) 3D preview via
+            // WeaponsModel.GetUserWeapon(InventoryID) -> this map. The old empty stub left each owned
+            // weapon's InventoryID unmapped -> no component list -> no weapon model -> the perpetual
+            // loading spinner. Map each owned weapon's InventoryID -> its component list
+            // (tempcomponentlists, keyed by mapKey == the weapon's ItemID; e.g. 170=M27, 339=P250).
+            foreach (GR5_UserItem ui in items)
+                if (ui.ItemType == 2)
+                    weaponConfig.Add(new GR5_WeaponConfiguration { unk1 = ui.InventoryID, unk2 = DBHelper.GetWeaponComponentList(ui.ItemID) });
         }
 
         public override byte[] ToBuffer()
