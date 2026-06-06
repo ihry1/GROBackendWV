@@ -62,6 +62,7 @@ void DetourClassInfoDiag();
 void DetourGestureDiag();
 void DetourMoodFix();
 void DetourDeployDiag();
+void DetourCustomizeDiag();
 
 void WriteByte(DWORD address, BYTE b)
 {	
@@ -292,11 +293,11 @@ void DetourMain()
 	}
 	else
 	{
-		Patch1();	//crash1 (AI_EntityHumanModel anim dword5CC null-deref — client anim init-ordering)
+		Patch1();  //crash1 [KEPT 2026-06-06: removal CRASHED -- sub_100ECC30 ticks at EARLY spawn (state 2) BEFORE the in-match pawn's dword5CC resolves; round-driving populates it only at state 3+ (too late). Real fix = drive dword5CC population BEFORE the locomotion driver's first tick (early server-driven mood/state update / create-deploy sequencing)]  WAS-REMOVED 2026-06-06: server-side round-driving (DS sends BM 900 StartRound after ClientReady) repopulates dword5CC post-load -- in an ACTIVE ROUND, aim/move/crouch produce mood deltas -> UpdateMood re-fires -> rosace resolver succeeds (banks loaded) -> dword5CC set. Diag (_gesture_diag_+_deploydiag_, NO _moodfix_/_walktest_): descSeen=1 on every post-deploy frame, zero null-descriptor frames. sub_100ECC30 now runs natively with a valid descriptor -> real walk, no crash. Revert: remove the leading //  //crash1 (AI_EntityHumanModel anim dword5CC null-deref — client anim init-ordering)
 	}
 	Patch2();	//crash2 — RE-ENABLED: removing it regressed the client. DS reached DO Migration but the client never sent AskForSynchronize (0xA3) -> stuck "connecting to match server". The in-match-load path still hits GR5_UserItem::GetRPPrice; the data-coverage argument wasn't sufficient.
-	Patch3();	//keyboard input
-	Patch4();	//cDNAManager::bCanSendEvent — RE-ENABLED with Patch2 (couldn't isolate which removal caused the stall without an A/B test; restoring both to recover the deploy-screen state)
+	//Patch3();  REMOVED 2026-06-06: IDA-verified COSMETIC -- SetMovementAnimation (0x10078780) only sets the move-start anim BLEND LENGTH (SetAnimationLength), never movement; the "keyboard input" label was wrong and there is no backend cause. Reverts to correct mood-gated blend selection in cActionSelectorPC::TryWalk. Revert: remove the leading //
+	//Patch4();  REMOVED 2026-06-06: op-var 89 served + CLIENT-FETCHED (backend log: "Received Request OpsProtocolService MethodID=19" at lobby time, before the match/DNA-mgr ctor) -> cDNAManager::bCanSendEvent latches true on its own from GetOpVarValue(89). Revert: remove the leading //   //cDNAManager::bCanSendEvent — RE-ENABLED with Patch2 (couldn't isolate which removal caused the stall without an A/B test; restoring both to recover the deploy-screen state)
 	// Patch5/6/7 DISABLED — they forced the client into the dedicated-server entity-init path,
 	// which then needs server-side RDV models (SkillsModel/InventoryModel) that don't exist for the
 	// emulated player -> FetchPlayerData null-deref hard crash. Core fix: let the pawn be a normal
@@ -318,6 +319,8 @@ void DetourMain()
 		DetourMoodFix();
 	if(FileExists("_deploydiag_"))	//drop an empty "_deploydiag_" file to log (on-change) the deploy-ramp gate state for the local pawn. FP-safe (fxsave/fxrstor-bracketed, integer-only path).
 		DetourDeployDiag();
+	if(FileExists("_customizediag_"))	//drop an empty "_customizediag_" file to log the weapon-customize store-functor lookups + GetAttachCompType compat results (splits "no attachments offered" into functor-empty vs compat-reject).
+		DetourCustomizeDiag();
 	//ReplaceVelocity();
 	//ZEN_Init(baseAddressAI);
 }
@@ -452,4 +455,15 @@ void DetourDeployDiag()
 	// Locomotion-bank diag: log whether banks 100-160 bind to the body GAO (ACT_bHasBankID @0x100629B0).
 	org_ACT_bHasBankID = (char(__cdecl*)(int,int)) DetourFunction((PBYTE)(baseAddressAI + 0x629B0), (PBYTE)ACT_bHasBankID_diag);
 	Log("Hooked AIDLL::ACT_bHasBankID (locomotion-bank diag)\n");
+}
+
+void DetourCustomizeDiag()
+{
+	// [CZ] weapon-customize store-functor diag (HookedFunctions.h). Splits "no buyable attachments"
+	// into functor-empty (GetFunctorsFromList {4,weaponType} MISSING/0) vs compat-reject
+	// (GetAttachCompType comp -> -1). Read-only logging passthroughs.
+	org_GetFunctorsFromList_diag = (DWORD(__fastcall*)(void*,void*,int)) DetourFunction((PBYTE)(baseAddressAI + 0x121B80), (PBYTE)GetFunctorsFromList_diag);
+	Log("Hooked GetFunctorsFromList (customize diag)\n");
+	org_GetAttachCompType_diag = (signed int(__fastcall*)(void*,void*,int)) DetourFunction((PBYTE)(baseAddressAI + 0x121D10), (PBYTE)GetAttachCompType_diag);
+	Log("Hooked AI_WeaponCustomizeHelper::GetAttachCompType (customize diag)\n");
 }

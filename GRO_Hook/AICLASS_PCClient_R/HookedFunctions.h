@@ -711,6 +711,15 @@ static int  g_dd_pShotEver = 0;   // [SHOT] diag: sticky -- 1 once pawn+0x274 (p
 static int  g_dd_pShotLogd = -2;  // [SHOT] diag: last-logged g_dd_pShotEver
 static int  g_dd_pOHandle = -2;  // [OWN] diag: weapon ownerEntityHandle (weapon+0x24); ctor zeroes it, set to the pawn during equip/build
 static int  g_dd_pOGot    = -2;  // [OWN] diag: GetOwnerEntityPawn(weapon)!=0 (bCanFire's hard owner gate; 0 = no owner -> no shot)
+// [ADS] diag (runs whenever _deploydiag_ is installed): WHY is the aim-down-sights camera at the wrong
+// position? The camera EYE is stance-mode-TABLE-driven (eye offset = CameraSettings + 416*mode, where
+// mode = camera m_ShootPosition.currValue.x); mode 0 == "looking at the legs" and it NEVER reads the
+// weapon iron bone. AI_Camera_SelectStanceCameraMode only returns an aim mode when the "aiming" mood bit
+// (m_Mood.currValue & 0x40000) is set AND the OTS->iron state (dword480) is engaged. These 3 pawn fields split it.
+static int  g_ads_init    = 0;   // [ADS] emit-on-change init
+static int  g_ads_pD480   = -2;  // [ADS] dword480 OTS/iron state (+0x480): 2=iron/ADS, 0=hip
+static int  g_ads_pAimBit = -2;  // [ADS] m_Mood.currValue & 0x40000 "aiming" bit (+0x824)
+static int  g_ads_pStance = -2;  // [ADS] currentStanceID (+0x474)
 
 // True if the raw IEEE-754 bits are a usable, comparable non-negative finite number
 // (sign clear, exponent not all-ones). Integer-only; does not load the value as a float.
@@ -889,6 +898,21 @@ int __fastcall Spawn_deploydiag(void* THIS, void* EDX, float dt)
 					loadState, moveMode, descSeen, rsSeen, rsSpeed, rbSeen, velSeen, desc, rbX);
 				Log(buffer);
 			}
+			// [ADS] read the 3 pawn fields that drive the stance-camera mode (see [ADS] tracker comment
+			// above). Raw integer reads of the validated pawn -- crash-safe, same style as [VEL]/[FIRE].
+			{
+				int adsD480   = *(int*)(pawn + 0x480);     // OTS<->IronSight state: 0=hip, 2=iron/ADS
+				DWORD adsMood = *(DWORD*)(pawn + 0x824);   // m_Mood.currValue
+				int adsStance = *(int*)(pawn + 0x474);     // currentStanceID
+				int adsAimBit = (adsMood & 0x40000) ? 1 : 0;
+				if (!g_ads_init || adsD480 != g_ads_pD480 || adsAimBit != g_ads_pAimBit || adsStance != g_ads_pStance)
+				{
+					g_ads_init = 1; g_ads_pD480 = adsD480; g_ads_pAimBit = adsAimBit; g_ads_pStance = adsStance;
+					sprintf(buffer, "[ADS] d480=%d (2=iron) mood=0x%08X aimBit=%d (0x40000) stance=%d\n\0",
+						adsD480, adsMood, adsAimBit, adsStance);
+					Log(buffer);
+				}
+			}
 		}
 		// --- [FIRE] diagnostic: WHY can't the player shoot? Decisive gate = clip rounds (ammo). ----
 			// Gated by "_firediag_" (g_fireDiagOn). bIsReadyToFire @0x10076d00 AND bCanFire @0x10068890 both
@@ -1046,5 +1070,54 @@ int __fastcall Spawn_deploydiag(void* THIS, void* EDX, float dt)
 
 	// 4) Restore the saved FPU+SSE state -> byte-identical to post-trampoline.
 	_fxrstor(g_dd_fxbuf);
+	return result;
+}
+
+// ============================================================================
+// WEAPON-CUSTOMIZE STORE-FUNCTOR DIAGNOSTIC  (installed only when a "_customizediag_" file exists)
+// ----------------------------------------------------------------------------
+// Goal: ground-truth WHY the weapon-customize page offers no buyable attachments.
+// AI_WeaponCustomizeHelper::BuildAvailableComponent3DObjects builds each slot's option list via:
+//   GetFunctorsFromList(storeFunctorList, &{u16 itemType=4, u16 weaponType})  -> the candidate SKUs,
+//   then AI_WeaponCustomizeHelper::GetAttachCompType(component) per SKU (compat gate; -1 == rejected).
+// Two read-only hooks split the failure cleanly:
+//   0x121B80 GetFunctorsFromList(this=ecx, int* functorId)  -> for component lookups (functorId[0]==4)
+//            log the weaponType key + whether a functor bucket was FOUND + its SKU count. MISSING/0 ==
+//            the {4,weaponType} functor was never populated (functor-build / bridge-key mismatch).
+//   0x121D10 AI_WeaponCustomizeHelper::GetAttachCompType(this=ecx, int compMapKey) -> log (comp,result).
+//            result == -1 means the served component was REJECTED by the weapon compat check.
+// FP-safe: the real function runs first; the (rare, menu-time) logging is bracketed by _fxsave/_fxrstor
+// on a 16-byte-aligned buffer; integer/hex only (no float math). functorId is a pointer passed as int.
+// ============================================================================
+DWORD      (__fastcall* org_GetFunctorsFromList_diag)(void*, void*, int) = 0;
+signed int (__fastcall* org_GetAttachCompType_diag)(void*, void*, int) = 0;
+__declspec(align(16)) static unsigned char g_cz_fxbuf[512];
+
+DWORD __fastcall GetFunctorsFromList_diag(void* THIS, void* EDX, int functorId)
+{
+	DWORD result = org_GetFunctorsFromList_diag(THIS, EDX, functorId);
+	// Only the component-functor lookups ({itemType==4, weaponType}) are interesting.
+	if (functorId && *(unsigned short*)functorId == 4)
+	{
+		_fxsave(g_cz_fxbuf);
+		unsigned short weaponType = *(unsigned short*)(functorId + 2);
+		// GetFunctorsFromList returns the BagTypeVector {dword0, ptrEntries@+4, size@+8}; size == SKU count.
+		int count = result ? *(int*)(result + 8) : 0;
+		sprintf(buffer, "[CZ] GetFunctorsFromList {4,%u} -> %s skuCount=%d\n\0",
+			weaponType, result ? "FOUND" : "MISSING", count);
+		Log(buffer);
+		_fxrstor(g_cz_fxbuf);
+	}
+	return result;
+}
+
+signed int __fastcall GetAttachCompType_diag(void* THIS, void* EDX, int compMapKey)
+{
+	signed int result = org_GetAttachCompType_diag(THIS, EDX, compMapKey);
+	_fxsave(g_cz_fxbuf);
+	sprintf(buffer, "[CZ] GetAttachCompType comp=%d -> %d%s\n\0",
+		compMapKey, result, (result == -1) ? "  (REJECTED)" : "");
+	Log(buffer);
+	_fxrstor(g_cz_fxbuf);
 	return result;
 }

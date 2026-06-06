@@ -20,7 +20,17 @@ namespace GRODedicatedServerWV
             Log.logFileName = "dslog.txt";
             Log.ClearLog();
             Log.box = rtb1;
-            DBHelper.Init();
+            // The DS's own database.sqlite is empty (0 bytes). Open the BACKEND's live DB read-only so the
+            // spawn can look up the player's loadout + each weapon's components. Read-only = safe concurrent
+            // reads while the backend writes; falls back to the local DB if that path can't be opened.
+            try
+            {
+                string backendDb = System.IO.Path.GetFullPath(System.IO.Path.Combine(
+                    AppDomain.CurrentDomain.BaseDirectory,
+                    @"..\..\..\..\GROBackendWV\bin\x86\Release\database.sqlite"));
+                DBHelper.Init("Data Source=" + backendDb + ";Read Only=True;BusyTimeout=3000");
+            }
+            catch { DBHelper.Init(); }
             toolStripComboBox1.SelectedIndex = 0;
         }
 

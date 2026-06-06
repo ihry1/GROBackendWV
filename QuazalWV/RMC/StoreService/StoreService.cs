@@ -1,4 +1,8 @@
-﻿using System.IO;
+﻿using System;
+using System.IO;
+using System.Linq;
+using System.Drawing;
+using System.Collections.Generic;
 using QuazalWV.DB;
 
 namespace QuazalWV
@@ -29,6 +33,12 @@ namespace QuazalWV
                 case 21:
                     rmc.request = new RMCPacketRequestStoreService_CompleteBuyWeaponAndAttachComponents(s);
                     break;
+                case 22: // InitiateBuyAndAttachComponents (re-attach components to an OWNED weapon)
+                    rmc.request = new RMCPacketRequestStoreService_InitiateBuyAndAttachComponents(s);
+                    break;
+                case 23: // CompleteBuyAndAttachComponents (TransactionId only -- reuse method-21's parser)
+                    rmc.request = new RMCPacketRequestStoreService_CompleteBuyWeaponAndAttachComponents(s);
+                    break;
                 case 26:
                     rmc.request = new RMCPacketRequestStoreService_InitiateBuyAbilityWithUpgrades(s);
                     break;
@@ -42,7 +52,9 @@ namespace QuazalWV
                     rmc.request = new RMCPacketRequestStoreService_CompleteBuyArmourAndAttachInserts(s);
                     break;
                 default:
-                    Log.WriteLine(1, "[RMC Store] Error: Unknown Method 0x" + rmc.methodID.ToString("X"));
+                    // CUSTOMIZE-CAPTURE: dump the raw body so an unrecognized customize/store apply
+                    // reveals its exact method id + bytes on the first in-game test.
+                    Log.WriteLine(1, "[RMC Store][CAPTURE] Unparsed Method 0x" + rmc.methodID.ToString("X") + " body=" + HexRest(s), Color.Orange);
                     break;
             }
         }
@@ -109,6 +121,35 @@ namespace QuazalWV
                     reply = new RMCPacketResponseStoreService_CompleteBuyWeaponAndAttachComponents();
                     RMC.SendResponseWithACK(client.udp, p, rmc, client, reply);
                     break;
+                case 22: // InitiateBuyAndAttachComponents -- the customize "apply" on an OWNED weapon
+                    {
+                        var attachInit = (RMCPacketRequestStoreService_InitiateBuyAndAttachComponents)rmc.request;
+                        Log.WriteLine(1, "[RMC Store][CAPTURE] (22) InitiateBuyAndAttachComponents"
+                            + " pid=" + client.PID
+                            + " WeaponSlotID=" + attachInit.WeaponSlotID
+                            + " WeaponBagType=" + attachInit.WeaponBagType
+                            + " SkuComps=[" + string.Join(",", attachInit.ComponentSkuData.Select(c => c.SkuId)) + "]"
+                            + " InvComps=[" + string.Join(",", attachInit.ComponentInventorySlotIds) + "]"
+                            + " Coupons=[" + string.Join(",", attachInit.CouponIds) + "]", Color.Cyan);
+                        // Capture build: record a no-cost transaction so the 2-phase flow proceeds (the
+                        // client gets a trId, then sends the Complete). NO persistence yet -- the encoding
+                        // of InvComps is being captured first. Persist lands in the follow-up build.
+                        trId = TransactionModel.SaveTransactionRaw(client.PID, TransactionType.BuyAndAttachComponents);
+                        reply = new RMCPacketResponseStoreService_InitiateBuyWeaponAndAttachComponents(trId);
+                        RMC.SendResponseWithACK(client.udp, p, rmc, client, reply);
+                        if (trId > 0)
+                            SendCompleteNotif(client, trId);
+                    }
+                    break;
+                case 23: // CompleteBuyAndAttachComponents -- returns inventory + current component lists
+                    {
+                        var attachCompl = (RMCPacketRequestStoreService_CompleteBuyWeaponAndAttachComponents)rmc.request;
+                        Log.WriteLine(1, "[RMC Store][CAPTURE] (23) CompleteBuyAndAttachComponents pid=" + client.PID + " trId=" + attachCompl.TransactionId, Color.Cyan);
+                        TransactionModel.CompleteTransaction(attachCompl.TransactionId);
+                        reply = BuildAttachCompleteResponse(client);
+                        RMC.SendResponseWithACK(client.udp, p, rmc, client, reply);
+                    }
+                    break;
                 case 26:
                     var buyAbilityInitReq = (RMCPacketRequestStoreService_InitiateBuyAbilityWithUpgrades)rmc.request;
                     trId = TransactionModel.SaveMultiItemTransaction(
@@ -152,9 +193,48 @@ namespace QuazalWV
                     RMC.SendResponseWithACK(client.udp, p, rmc, client, reply);
                     break;
                 default:
-                    Log.WriteLine(1, "[RMC Store] Error: Unknown Method 0x" + rmc.methodID.ToString("X"));
+                    // CUSTOMIZE-CAPTURE: dump the raw body so an unhandled customize/store apply reveals
+                    // its exact method id + bytes on the first in-game test.
+                    Log.WriteLine(1, "[RMC Store][CAPTURE] Unhandled Method 0x" + rmc.methodID.ToString("X") + " body=" + HexBody(p, rmc), Color.Orange);
                     break;
             }
+        }
+
+        // Current inventory + per-owned-weapon component lists (keyed by InventoryID), the standard
+        // CompleteBuy*AndAttach* reply shape. Serves the DEFAULT component lists for now; the follow-up
+        // build overrides with the persisted per-instance custom list once the wire encoding is locked.
+        private static RMCPacketResponseStoreService_CompleteBuyWeaponAndAttachComponents BuildAttachCompleteResponse(ClientInfo client)
+        {
+            var r = new RMCPacketResponseStoreService_CompleteBuyWeaponAndAttachComponents();
+            r.Inventory = DBHelper.GetAllUserItems(client.PID);
+            foreach (GR5_UserItem ui in r.Inventory)
+                if (ui.ItemType == 2)
+                    r.UserComponentLists.Add(new Map_U32_VectorU32 { key = ui.InventoryID, vector = DBHelper.GetWeaponComponentList(ui.ItemID) });
+            return r;
+        }
+
+        // Hex of the un-consumed remainder of the request stream (parse-side default).
+        private static string HexRest(Stream s)
+        {
+            long pos = s.Position;
+            int len = (int)(s.Length - pos);
+            if (len <= 0) return "";
+            byte[] b = new byte[len];
+            s.Read(b, 0, len);
+            s.Position = pos;
+            return BitConverter.ToString(b).Replace("-", "");
+        }
+
+        // Hex of the RMC request body (params after callID+methodID) straight from the raw packet
+        // (handle-side default, where rmc.request was never parsed).
+        private static string HexBody(QPacket p, RMCP rmc)
+        {
+            int off = rmc._afterProtocolOffset + 8;
+            if (p.payload == null || off >= p.payload.Length) return "";
+            int len = p.payload.Length - off;
+            byte[] b = new byte[len];
+            Array.Copy(p.payload, off, b, 0, len);
+            return BitConverter.ToString(b).Replace("-", "");
         }
 
         /// <summary>

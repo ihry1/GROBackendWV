@@ -381,6 +381,7 @@
     <Compile Include="RMC\StoreService\Request\RMCPacketRequestStoreService_CompleteBuyItem.cs" />
     <Compile Include="RMC\StoreService\Request\RMCPacketRequestStoreService_CompleteBuyWeaponAndAttachComponents.cs" />
     <Compile Include="RMC\StoreService\Request\RMCPacketRequestStoreService_InitiateBuyAbilityWithUpgrades.cs" />
+    <Compile Include="RMC\StoreService\Request\RMCPacketRequestStoreService_InitiateBuyAndAttachComponents.cs" />
     <Compile Include="RMC\StoreService\Request\RMCPacketRequestStoreService_InitiateBuyArmourAndAttachInserts.cs" />
     <Compile Include="RMC\StoreService\Request\RMCPacketRequestStoreService_InitiateBuyItem.cs" />
     <Compile Include="RMC\StoreService\Request\RMCPacketRequestStoreService_InitiateBuyWeaponAndAttachComponents.cs" />

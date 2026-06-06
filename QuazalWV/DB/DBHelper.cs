@@ -13,11 +13,15 @@ namespace QuazalWV
     {
         public static SQLiteConnection connection = new SQLiteConnection();
 
-        public static void Init()
+        // connStr defaults to the process's own database.sqlite (the backend). The dedicated server
+        // passes the BACKEND's db path in read-only mode so it can look up loadouts/weapon components
+        // at spawn (its own db is 0 bytes). Close-if-open lets a caller retry with a different source.
+        public static void Init(string connStr = "Data Source=database.sqlite")
         {
-            connection.ConnectionString = "Data Source=database.sqlite";
+            if (connection.State != System.Data.ConnectionState.Closed) connection.Close();
+            connection.ConnectionString = connStr;
             connection.Open();
-            Log.WriteLine(1, "DB loaded...");
+            Log.WriteLine(1, "DB loaded (" + connStr + ")...");
         }
 
         public static List<List<string>> GetQueryResults(string query)
@@ -332,6 +336,22 @@ namespace QuazalWV
             uint invId = GetInventoryIdForItem(pid, itemId);
             if (invId == 0) return;                       // not owned -> leave the slot untouched
             SetSlotInventoryId(bagId, slotId, invId);     // UPDATE only affects an existing slot row
+        }
+
+        // The equipped weapon's mapKey for a loadout slot (bagtype 4): slot 1 = primary, 2 = secondary.
+        // Returns 0 if nothing is equipped / not found. Lets the DS spawn field the player's actual guns.
+        public static uint GetLoadoutWeapon(uint pid, uint slotId)
+        {
+            try
+            {
+                int bagId = GetBagId(pid, 4);
+                if (bagId < 0) return 0;
+                uint invId = GetSlotInventoryId(bagId, slotId);
+                if (invId == 0) return 0;
+                List<List<string>> r = GetQueryResults("SELECT itemid FROM useritems WHERE inventoryid=" + invId + " AND pid=" + pid);
+                return r.Count > 0 ? Convert.ToUInt32(r[0][0]) : 0;
+            }
+            catch { return 0; }
         }
 
         // Component map-key list for a weapon, by its weapons.mapKey (== componentListID).

@@ -89,6 +89,30 @@ namespace QuazalWV.DB
             }
         }
 
+        /// <summary>
+        /// Persists a transaction row WITHOUT a SKU cost lookup. Used by attach/re-arrange flows
+        /// (e.g. method 22 BuyAndAttachComponents) where the apply may carry no purchased SKU at all
+        /// (the player re-attaches components they already own), so there is nothing to price -- and
+        /// the cost-lookup helpers throw on an absent/zero SKU. Returns the new transaction id, or 0.
+        /// </summary>
+        public static uint SaveTransactionRaw(uint pid, StoreService.TransactionType trType)
+        {
+            long now = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+            SQLiteCommand cmd = new SQLiteCommand(
+                "INSERT INTO transactions (initiatedAt,pid,skuId,transactionType,currencyType,totalPrice) " +
+                $"VALUES ({now},{pid},0,{(uint)trType},0,0);SELECT last_insert_rowid();", DBHelper.connection);
+            try
+            {
+                return (uint)(long)cmd.ExecuteScalar();
+            }
+            catch (Exception e)
+            {
+                Log.WriteLine(1, e.ToString(), Color.Red);
+                Log.WriteLine(1, $"[RMC Store] Raw transaction failed (pid={pid}, trType={trType})", Color.Red);
+                return 0;
+            }
+        }
+
         public static bool CompleteTransaction(uint transactionId)
         {
             long now = DateTimeOffset.UtcNow.ToUnixTimeSeconds();

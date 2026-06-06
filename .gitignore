@@ -78,3 +78,18 @@ msbuild.wrn
 
 # Third-party HexBox control: ignore its working copy
 Be.Windows.Forms.HexBox/*
+
+## ============================================================
+##  Seeded databases in build folders -- TRACK them despite the
+##  build-dir ignores above. git cannot re-include a file whose parent
+##  directory is excluded, so re-open each path level (re-ignoring the
+##  siblings at each level) down to the DB. Only the live backend DB is
+##  tracked here; the DS's bin DB stays ignored (it is empty/0 bytes).
+## ============================================================
+!GROBackendWV/bin/
+GROBackendWV/bin/*
+!GROBackendWV/bin/x86/
+GROBackendWV/bin/x86/*
+!GROBackendWV/bin/x86/Release/
+GROBackendWV/bin/x86/Release/*
+!GROBackendWV/bin/x86/Release/database.sqlite

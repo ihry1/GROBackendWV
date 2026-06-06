@@ -112,12 +112,21 @@ namespace QuazalWV
                             Global.spawnX = _sx; Global.spawnY = _sy; Global.spawnZ = _sz;
                             Log.WriteLine(1, "[DS] Spawning player at (" + _sx + ", " + _sy + ", " + _sz + ") from Yeti.big");
                         }
+                        // Spawn the player with their ACTUAL loadout weapons. The DS reads the backend DB
+                        // read-only: loadout bag (bagtype 4) slot 1 = primary, slot 2 = secondary. Falls back
+                        // to the M27/P250 defaults when the lookup returns 0 (wrong/absent pid, empty loadout).
+                        OCP_PlayerEntity _pe = new OCP_PlayerEntity(2);
+                        uint _primary = DBHelper.GetLoadoutWeapon(client.PID, 1);
+                        uint _secondary = DBHelper.GetLoadoutWeapon(client.PID, 2);
+                        Log.WriteLine(1, "[DS] spawn loadout: pid=" + client.PID + " primary=" + _primary + " secondary=" + _secondary);
+                        if (_primary != 0) _pe.mainWeaponID = _primary;
+                        if (_secondary != 0) _pe.pistolWeaponID = _secondary;
                         msgs.Add(DO_RMCRequestMessage.Create(client.callCounterDO_RMC++,
                             0x1006,
                             new DupObj(DupObjClass.Station, 1),
                             new DupObj(DupObjClass.NET_MessageBroker, 5),
                             (ushort)DO_RMCRequestMessage.DOC_METHOD.ProcessMessage,
-                            BM_Message.Make(new MSG_ID_Net_Obj_Create(0x2A, 0x05, new OCP_PlayerEntity(2).MakePayload()))
+                            BM_Message.Make(new MSG_ID_Net_Obj_Create(0x2A, 0x05, _pe.MakePayload()))
                             ));
                         // HOLD at state 3 (Spawning) — do NOT walk to state 5 here. The client must run its
                         // ProcessSpawningMaster handshake (concrete pawn exists + weapons async-load ~2.4s +
@@ -168,6 +177,20 @@ namespace QuazalWV
                             ));
                         client.clientReadyHandled = true;
                         Log.WriteLine(1, "[DS] Client ClientReady (0x35) -> set params bit 0x2000 + ChangeState(5) Loop");
+                        // Player is now ready/alive (abstract state 5). Drive a real ROUND (BM 900 ->
+                        // AI_Match.state 2): the round self-ticks client-side (AI_MatchClient::Update @0x101bfea0
+                        // -> AI_MatchRoundClient::UpdateRoundClock @0x101c2080, currentRoundLength =
+                        // netclock/1000 - roundStartTime), giving real wave respawns + a round timer. Warmup
+                        // (state 1) still covers the FIRST spawn; this fires AFTER the player is alive so the
+                        // deploy-screen gate (IsWaitingForWave && abstract.currentState==2) can't re-engage.
+                        msgs.Add(DO_RMCRequestMessage.Create(client.callCounterDO_RMC++,
+                            0x1006,
+                            new DupObj(DupObjClass.Station, 1),
+                            new DupObj(DupObjClass.NET_MessageBroker, 5),
+                            (ushort)DO_RMCRequestMessage.DOC_METHOD.ProcessMessage,
+                            BM_Message.Make(new MSG_ID_BM_StartRound())
+                            ));
+                        Log.WriteLine(1, "[DS] ClientReady -> StartRound (BM 900) state 2 (roundStartTime = uptime sec)");
                     }
                     break;
             }

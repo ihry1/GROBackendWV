@@ -163,7 +163,9 @@ namespace QuazalWV
                         break;
 
                     case ClassInfoMemBuffer.eGrenade:
-                        ClassInfo_Grenade nadeInfo = new ClassInfo_Grenade(mainWeaponID);
+                        // Fixed placeholder grenade (Test components -- see ClassInfo_Grenade); pin weaponID
+                        // to 170 so making mainWeaponID dynamic from the real loadout doesn't alter this slot.
+                        ClassInfo_Grenade nadeInfo = new ClassInfo_Grenade(170);
                         nadeInfo.memBufferSize = Convert.ToByte(nadeInfo.MakePayload().Length - 1);
                         buffer = nadeInfo.MakePayload();
                         m.Write(buffer, 0, buffer.Length);

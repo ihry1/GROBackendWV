@@ -123,15 +123,28 @@ namespace QuazalWV
                 case 0x266:
                     break;
                 case 0x325:
-                    // Keep the match in WARMUP (see the 0xA3 case) so the spawn-wave clock keeps advancing and the
-                    // deploy screen never re-blocks input. Do NOT send StartRound (BM 900 / state 2 Round) here.
-                    msgs.Add(DO_RMCRequestMessage.Create(client.callCounterDO_RMC++,
-                        0x1006,
-                        new DupObj(DupObjClass.Station, 1),
-                        new DupObj(DupObjClass.NET_MessageBroker, 5),
-                        (ushort)DO_RMCRequestMessage.DOC_METHOD.ProcessMessage,
-                        Make(new MSG_ID_BM_Warmup())
-                        ));
+                    // Pre-ready: keep the match in WARMUP (state 1) so the spawn-wave clock advances and the
+                    // player can make its FIRST spawn (deploy screen clears). Once the client is ready/alive
+                    // (ClientReady handled), switch to a real ROUND (BM 900 / state 2) and keep sending
+                    // StartRound -- never Warmup -- so a late/repeat 0x325 can't flip the match back to
+                    // warmup (state 1) and fight the round clock. StartRound with the same roundID is
+                    // idempotent: AI_MatchClient::BroadcastMessage keeps the existing AI_MatchRoundClient.
+                    if (client.clientReadyHandled)
+                        msgs.Add(DO_RMCRequestMessage.Create(client.callCounterDO_RMC++,
+                            0x1006,
+                            new DupObj(DupObjClass.Station, 1),
+                            new DupObj(DupObjClass.NET_MessageBroker, 5),
+                            (ushort)DO_RMCRequestMessage.DOC_METHOD.ProcessMessage,
+                            Make(new MSG_ID_BM_StartRound())
+                            ));
+                    else
+                        msgs.Add(DO_RMCRequestMessage.Create(client.callCounterDO_RMC++,
+                            0x1006,
+                            new DupObj(DupObjClass.Station, 1),
+                            new DupObj(DupObjClass.NET_MessageBroker, 5),
+                            (ushort)DO_RMCRequestMessage.DOC_METHOD.ProcessMessage,
+                            Make(new MSG_ID_BM_Warmup())
+                            ));
                     break;
             }
             // NOTE: the post-spawn Gesture (0x28) send was REMOVED. RE proved cGestureMix::Play never writes
