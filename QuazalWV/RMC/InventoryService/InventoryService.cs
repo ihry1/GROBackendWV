@@ -54,8 +54,8 @@ namespace QuazalWV
                     reply = new RMCPacketResponseInventoryService_FullUserInventory(client);
                     RMC.SendResponseWithACK(client.udp, p, rmc, client, reply);
                     break;
-                case 8: // EquipLoadout (drag-equip into a loadout slot) -- MINIMAL (no DB swap yet)
-                    reply = new RMCPacketResponseInventoryService_EquipLoadout(client);
+                case 8: // EquipLoadout (drag-equip into a loadout slot) -- persists the slot swap
+                    reply = new RMCPacketResponseInventoryService_EquipLoadout(p, rmc, client);
                     RMC.SendResponseWithACK(client.udp, p, rmc, client, reply);
                     break;
                 case 9: // SellUserItem -- void return; success ACK closes the sell transaction
@@ -69,16 +69,16 @@ namespace QuazalWV
                         RMC.SendResponseWithACK(client.udp, p, rmc, client, reply);
                     }
                     break;
-                case 11: // UpdateLobbyInventoryBag -- MINIMAL (echoes slots, no DB move yet)
+                case 11: // UpdateLobbyInventoryBag -- persists the slot move
                     {
                         uint fromSlotID = ReadRequestU32(p, rmc, 0);
                         uint toSlotID = ReadRequestU32(p, rmc, 1);
-                        reply = new RMCPacketResponseInventoryService_UpdateLobbyInventoryBag(fromSlotID, toSlotID);
+                        reply = new RMCPacketResponseInventoryService_UpdateLobbyInventoryBag(client, fromSlotID, toSlotID);
                         RMC.SendResponseWithACK(client.udp, p, rmc, client, reply);
                     }
                     break;
-                case 12: // ReduceInventoryDurability (match teardown) -- MINIMAL (no DB depletion yet)
-                    reply = new RMCPacketResponseInventoryService_ReduceInventoryDurability(client);
+                case 12: // ReduceInventoryDurability (match teardown) -- persists durability loss
+                    reply = new RMCPacketResponseInventoryService_ReduceInventoryDurability(p, rmc, client);
                     RMC.SendResponseWithACK(client.udp, p, rmc, client, reply);
                     break;
                 case 13: // ApplyItem -- void return; success ACK = apply ok
@@ -97,9 +97,13 @@ namespace QuazalWV
                     reply = new RMCPacketResponseInventoryService_GetAllDefaultLoadoutKits(client);
                     RMC.SendResponseWithACK(client.udp, p, rmc, client, reply);
                     break;
-                case 17: // EquipPlayerWithLoadoutKit (char-select kit) -- returns full inv; real kit-apply TODO
-                    reply = new RMCPacketResponseInventoryService_FullUserInventory(client);
-                    RMC.SendResponseWithACK(client.udp, p, rmc, client, reply);
+                case 17: // EquipPlayerWithLoadoutKit (char-select kit) -- applies kit weapons, then returns full inv
+                    {
+                        uint kitID = ReadRequestU32(p, rmc, 0);
+                        DBHelper.ApplyLoadoutKit(client.PID, kitID);
+                        reply = new RMCPacketResponseInventoryService_FullUserInventory(client);
+                        RMC.SendResponseWithACK(client.udp, p, rmc, client, reply);
+                    }
                     break;
                 case 18: // GetPersonaInventoryWithAddOns (defensive) -> triple + add-on maps
                     reply = new RMCPacketResponseInventoryService_GetPersonaInventoryWithAddOns(client);

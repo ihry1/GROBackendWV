@@ -259,6 +259,81 @@ namespace QuazalWV
             return result;
         }
 
+        // === InventoryService persistence helpers (methods 8/11/12/17). ===
+        // Schema (verified from the read paths above):
+        //   inventorybags:     id(0)  pid(1)  bagtype(2)
+        //   inventorybagslots: id(0)  bagid(1)  inventoryid(2)  slotid(3)  durability(4)
+        //   useritems:         id(0)  inventoryid(1)  pid(2)  itemtype(3)  itemid(4) ...
+        // bagtype 4 == the loadout bag. slotid == the in-bag slot index. inventoryid == the equipped item.
+
+        // inventorybags.id for a persona's bag of the given bagtype, or -1 if none.
+        public static int GetBagId(uint pid, uint bagType)
+        {
+            List<List<string>> r = GetQueryResults("SELECT id FROM inventorybags WHERE pid=" + pid + " AND bagtype=" + bagType);
+            return r.Count > 0 ? Convert.ToInt32(r[0][0]) : -1;
+        }
+
+        // The inventoryid currently sitting in (bag, slot), or 0 if the slot is empty/absent.
+        public static uint GetSlotInventoryId(int bagId, uint slotId)
+        {
+            List<List<string>> r = GetQueryResults("SELECT inventoryid FROM inventorybagslots WHERE bagid=" + bagId + " AND slotid=" + slotId);
+            return r.Count > 0 ? Convert.ToUInt32(r[0][0]) : 0;
+        }
+
+        // Write the inventoryid into (bag, slot). Only touches an existing row (safe no-op otherwise).
+        public static void SetSlotInventoryId(int bagId, uint slotId, uint inventoryId)
+        {
+            try { new SQLiteCommand("UPDATE inventorybagslots SET inventoryid=" + inventoryId + " WHERE bagid=" + bagId + " AND slotid=" + slotId, connection).ExecuteNonQuery(); }
+            catch { }
+        }
+
+        // As above, also setting durability.
+        public static void SetSlotInventoryId(int bagId, uint slotId, uint inventoryId, uint durability)
+        {
+            try { new SQLiteCommand("UPDATE inventorybagslots SET inventoryid=" + inventoryId + ", durability=" + durability + " WHERE bagid=" + bagId + " AND slotid=" + slotId, connection).ExecuteNonQuery(); }
+            catch { }
+        }
+
+        // Decrement an equipped item's durability (clamped at 0), located by inventoryid within the persona's bags.
+        public static void ReduceSlotDurabilityByInventoryId(uint pid, uint inventoryId, uint amount)
+        {
+            try { new SQLiteCommand("UPDATE inventorybagslots SET durability = MAX(0, durability - " + amount + ") WHERE inventoryid=" + inventoryId + " AND bagid IN (SELECT id FROM inventorybags WHERE pid=" + pid + ")", connection).ExecuteNonQuery(); }
+            catch { }
+        }
+
+        // Resolve a kit's template ItemID to the persona's owned useritems.inventoryid (0 if not owned).
+        public static uint GetInventoryIdForItem(uint pid, uint itemId)
+        {
+            List<List<string>> r = GetQueryResults("SELECT inventoryid FROM useritems WHERE pid=" + pid + " AND itemid=" + itemId);
+            return r.Count > 0 ? Convert.ToUInt32(r[0][0]) : 0;
+        }
+
+        // Apply a loadout kit's weapons to the persona's loadout bag (bagtype 4) for method 17
+        // (EquipPlayerWithLoadoutKit). Verified from the live loadout bag (pid 4660): slot 1 = primary
+        // weapon, slot 2 = secondary (both itemtype 2); slots 7/8/9 hold itemtype-4 items whose kit-field
+        // mapping isn't confirmed yet, so we place ONLY the two weapons. Each write is a safe no-op if the
+        // player doesn't own the kit's weapon or the slot row is absent (SetSlotInventoryId UPDATEs in place).
+        public static void ApplyLoadoutKit(uint pid, uint kitId)
+        {
+            GR5_LoadoutKit kit = null;
+            foreach (GR5_LoadoutKit k in GetLoadoutKits(pid))
+                if (k.m_LoadoutKitID == kitId) { kit = k; break; }
+            if (kit == null) return;
+            int bagId = GetBagId(pid, 4);
+            if (bagId < 0) return;
+            EquipKitSlot(pid, bagId, 1, kit.m_Weapon1ID);
+            EquipKitSlot(pid, bagId, 2, kit.m_Weapon2ID);
+        }
+
+        // Resolve a kit ItemID to the persona's owned inventoryid and drop it into (loadout bag, slot).
+        private static void EquipKitSlot(uint pid, int bagId, uint slotId, uint itemId)
+        {
+            if (itemId == 0) return;
+            uint invId = GetInventoryIdForItem(pid, itemId);
+            if (invId == 0) return;                       // not owned -> leave the slot untouched
+            SetSlotInventoryId(bagId, slotId, invId);     // UPDATE only affects an existing slot row
+        }
+
         // Component map-key list for a weapon, by its weapons.mapKey (== componentListID).
         // Lets the spawn create-blob build each weapon's real component set instead of a hardcoded M27.
         public static List<uint> GetWeaponComponentList(uint mapKey)

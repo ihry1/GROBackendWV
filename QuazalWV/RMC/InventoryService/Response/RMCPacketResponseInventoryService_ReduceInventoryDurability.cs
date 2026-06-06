@@ -11,15 +11,29 @@ namespace QuazalWV
     //   Request : qvector<GR5_DepletionSlot> _DurabilityDepletionList
     //   Response: qvector<GR5_InventoryBag> _InventoryBagList
     //
-    // MINIMAL: does NOT yet decrement durability in the DB. Returns the persona's current bags so the
-    // client gets a valid reply (previously: no response). Real impl: for each depletion slot, lower
-    // inventorybagslots.durability, then return the updated bags. See AGENT_HANDOFF.md.
+    // GR5_DepletionSlot is 3x u32: { m_InventoryID, m_ParentID, m_Durability }. Decrement each
+    // referenced item's durability (m_Durability = amount to subtract; inferred, clamped at 0),
+    // then return the persona's updated bags.
     public class RMCPacketResponseInventoryService_ReduceInventoryDurability : RMCPResponse
     {
         public List<GR5_InventoryBag> bags = new List<GR5_InventoryBag>();
 
-        public RMCPacketResponseInventoryService_ReduceInventoryDurability(ClientInfo client)
+        public RMCPacketResponseInventoryService_ReduceInventoryDurability(QPacket p, RMCP rmc, ClientInfo client)
         {
+            try
+            {
+                MemoryStream rm = new MemoryStream(p.payload);
+                rm.Seek(rmc._afterProtocolOffset + 8, 0);
+                uint count = Helper.ReadU32(rm);
+                for (uint i = 0; i < count; i++)
+                {
+                    uint invId = Helper.ReadU32(rm);
+                                 Helper.ReadU32(rm);   // m_ParentID (unused)
+                    uint dur   = Helper.ReadU32(rm);
+                    DBHelper.ReduceSlotDurabilityByInventoryId(client.PID, invId, dur);
+                }
+            }
+            catch { }
             bags = DBHelper.GetAllInventoryBags(client.PID);
         }
 

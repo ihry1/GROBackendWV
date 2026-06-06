@@ -38,7 +38,11 @@ namespace QuazalWV
                     this.weaponID = 170;
                     componentListID = 170;
                     oasisNameID = 72925;
-                    componentIds = new List<uint>() { 79, 171, 81, 82, 172, 84, 173, 86, 169 };
+                    // 11004 = the added Burst (type 17) fire-mode component. The in-match weapon is built
+                    // ONLY from this explicit list (AsyncLoadOneAdvancedWeapon resolves each mapKey via
+                    // WeaponsModel->GetComponent + SetComponent into componentList[type]); it does NOT read
+                    // tempcomponentlists, so an appended fire-mode component must be listed here to appear.
+                    componentIds = new List<uint>() { 79, 171, 81, 82, 172, 84, 11004, 173, 86, 169 };
                     break;
             }
             nbComponents = (byte)componentIds.Count;
