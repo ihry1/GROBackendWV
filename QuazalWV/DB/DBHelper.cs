@@ -42,6 +42,29 @@ namespace QuazalWV
             return result;
         }
 
+        // Defensive numeric parse for DB string cells (each is reader[i].ToString()). The retail RMC
+        // handlers called Convert.ToUInt32/ToByte directly, which THROW on an empty/NULL/non-numeric
+        // cell; that exception is swallowed by the packet receive loop, so the entire response is
+        // silently lost and the client hangs forever (exactly what the empty-odesc templateitems seed
+        // did to "loading lobby"). These never throw: empty/NULL/garbage -> 0, decimal text ("0.0")
+        // -> truncated, out-of-range -> clamped.
+        public static uint SafeU32(string s)
+        {
+            if (string.IsNullOrWhiteSpace(s)) return 0;
+            uint u;
+            if (uint.TryParse(s, out u)) return u;
+            double d;
+            if (double.TryParse(s, System.Globalization.NumberStyles.Any, System.Globalization.CultureInfo.InvariantCulture, out d))
+                return d <= 0 ? 0u : (d >= uint.MaxValue ? uint.MaxValue : (uint)d);
+            return 0;
+        }
+
+        public static byte SafeU8(string s)
+        {
+            uint u = SafeU32(s);
+            return u > 255 ? (byte)255 : (byte)u;
+        }
+
         public static ClientInfo GetUserByName(string name)
         {
             ClientInfo result = null;
@@ -139,24 +162,34 @@ namespace QuazalWV
             List<List<string>> results = GetQueryResults("SELECT * FROM templateitems");
             foreach (List<string> entry in results)
             {
-                GR5_TemplateItem item = new GR5_TemplateItem
+                // Per-row guard: a single malformed row must never take down the whole response (and
+                // with it the lobby). SafeU32/SafeU8 won't throw on bad numeric cells; the try/catch is
+                // the backstop for anything else (e.g. a short row) -> skip that row + log it.
+                try
                 {
-                    m_ItemID = Convert.ToUInt32(entry[1]),
-                    m_ItemType = Convert.ToByte(entry[2]),
-                    m_ItemName = entry[3],
-                    m_DurabilityType = Convert.ToByte(entry[4]),
-                    m_IsInInventory = entry[5] == "True",
-                    m_IsSellable = entry[6] == "True",
-                    m_IsLootable = entry[7] == "True",
-                    m_IsRewardable = entry[8] == "True",
-                    m_IsUnlockable = entry[9] == "True",
-                    m_MaxItemInSlot = Convert.ToUInt32(entry[10]),
-                    m_GearScore = Convert.ToUInt32(entry[11]),
-                    m_IGCValue = Convert.ToUInt32(entry[12]) / 100f,
-                    m_OasisName = Convert.ToUInt32(entry[13]),
-                    m_OasisDesc = Convert.ToUInt32(entry[14])
-                };
-                result.Add(item);
+                    GR5_TemplateItem item = new GR5_TemplateItem
+                    {
+                        m_ItemID = SafeU32(entry[1]),
+                        m_ItemType = SafeU8(entry[2]),
+                        m_ItemName = entry[3] ?? "",
+                        m_DurabilityType = SafeU8(entry[4]),
+                        m_IsInInventory = entry[5] == "True",
+                        m_IsSellable = entry[6] == "True",
+                        m_IsLootable = entry[7] == "True",
+                        m_IsRewardable = entry[8] == "True",
+                        m_IsUnlockable = entry[9] == "True",
+                        m_MaxItemInSlot = SafeU32(entry[10]),
+                        m_GearScore = SafeU32(entry[11]),
+                        m_IGCValue = SafeU32(entry[12]) / 100f,
+                        m_OasisName = SafeU32(entry[13]),
+                        m_OasisDesc = SafeU32(entry[14])
+                    };
+                    result.Add(item);
+                }
+                catch (Exception ex)
+                {
+                    Log.WriteLine(1, "[GetTemplateItems] SKIPPED malformed row iid=" + (entry.Count > 1 ? entry[1] : "?") + " : " + ex.Message);
+                }
             }
             return result;
         }
@@ -177,10 +210,17 @@ namespace QuazalWV
                 results = GetQueryResults("SELECT * FROM inventorybagslots WHERE bagid=" + bagID);
                 foreach (List<string> entry in results)
                 {
+                    uint invId = SafeU32(entry[2]);
+                    // Skip EMPTY slots. An inventoryid==0 bag slot is built into a key-0 node in the client's
+                    // per-bag slot hashmap (RDV_cl_InventoryManager::GetUserItemForSlot, keyed by inventoryid),
+                    // whose GR5_UserItem has ItemID==0. The deploy 3D-preview (UI3DLootVisualContainer ->
+                    // LoadTemplateAsync) then loads a null GAO -> cObjectManager.cpp:854 "Loading Wrong Type ?"
+                    // hard assert at "SPAWNING INTO GAME". Empty positions must simply be absent, not item-0.
+                    if (invId == 0) continue;
                     GR5_InventoryBagSlot slot = new GR5_InventoryBagSlot();
-                    slot.InventoryID = Convert.ToUInt32(entry[2]);
-                    slot.SlotID = Convert.ToUInt32(entry[3]);
-                    slot.Durability = Convert.ToUInt32(entry[4]);
+                    slot.InventoryID = invId;
+                    slot.SlotID = SafeU32(entry[3]);
+                    slot.Durability = SafeU32(entry[4]);
                     bag.m_InventoryBagSlotVector.Add(slot);
                 }
                 result.Add(bag);
@@ -252,10 +292,17 @@ namespace QuazalWV
                 List<List<string>> slotResults = GetQueryResults("SELECT * FROM inventorybagslots WHERE bagid=" + bagIDs[i]);
                 foreach (List<string> entry in slotResults)
                 {
+                    uint invId = SafeU32(entry[2]);
+                    // Skip EMPTY slots (inventoryid==0). This is the live loadout/inventory path used by
+                    // GetUserInventoryByBagType. An inventoryid==0 slot becomes a key-0 node in the client's
+                    // slot hashmap (RDV_cl_InventoryManager::GetUserItemForSlot, keyed by inventoryid) whose
+                    // GR5_UserItem is a default (ItemID=0, OasisName=70870). The deploy 3D-preview then loads a
+                    // null GAO -> cObjectManager.cpp:854 "Loading Wrong Type ?" hard assert at "SPAWNING INTO GAME".
+                    if (invId == 0) continue;
                     GR5_InventoryBagSlot slot = new GR5_InventoryBagSlot();
-                    slot.InventoryID = Convert.ToUInt32(entry[2]);
-                    slot.SlotID = Convert.ToUInt32(entry[3]);
-                    slot.Durability = Convert.ToUInt32(entry[4]);
+                    slot.InventoryID = invId;
+                    slot.SlotID = SafeU32(entry[3]);
+                    slot.Durability = SafeU32(entry[4]);
                     bag.m_InventoryBagSlotVector.Add(slot);
                 }
                 result.Add(bag);

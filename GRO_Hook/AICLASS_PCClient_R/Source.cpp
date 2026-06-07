@@ -295,7 +295,7 @@ void DetourMain()
 	{
 		Patch1();  //crash1 [KEPT 2026-06-06: removal CRASHED -- sub_100ECC30 ticks at EARLY spawn (state 2) BEFORE the in-match pawn's dword5CC resolves; round-driving populates it only at state 3+ (too late). Real fix = drive dword5CC population BEFORE the locomotion driver's first tick (early server-driven mood/state update / create-deploy sequencing)]  WAS-REMOVED 2026-06-06: server-side round-driving (DS sends BM 900 StartRound after ClientReady) repopulates dword5CC post-load -- in an ACTIVE ROUND, aim/move/crouch produce mood deltas -> UpdateMood re-fires -> rosace resolver succeeds (banks loaded) -> dword5CC set. Diag (_gesture_diag_+_deploydiag_, NO _moodfix_/_walktest_): descSeen=1 on every post-deploy frame, zero null-descriptor frames. sub_100ECC30 now runs natively with a valid descriptor -> real walk, no crash. Revert: remove the leading //  //crash1 (AI_EntityHumanModel anim dword5CC null-deref — client anim init-ordering)
 	}
-	Patch2();	//crash2 — RE-ENABLED: removing it regressed the client. DS reached DO Migration but the client never sent AskForSynchronize (0xA3) -> stuck "connecting to match server". The in-match-load path still hits GR5_UserItem::GetRPPrice; the data-coverage argument wasn't sufficient.
+	//Patch2();  REMOVED 2026-06-06: seeded templateitems (type=4, dtype=0) for the 202 uncovered weapon-components (iid 10128-11014) that GetTemplateItemForSlot returned null for -> GetRPPrice now receives a valid tempItem, no null-deref. Revert: remove leading // (and DELETE the seeded component rows from templateitems). orig: //crash2 — RE-ENABLED: removing it regressed the client. DS reached DO Migration but the client never sent AskForSynchronize (0xA3) -> stuck "connecting to match server". The in-match-load path still hits GR5_UserItem::GetRPPrice; the data-coverage argument wasn't sufficient.
 	//Patch3();  REMOVED 2026-06-06: IDA-verified COSMETIC -- SetMovementAnimation (0x10078780) only sets the move-start anim BLEND LENGTH (SetAnimationLength), never movement; the "keyboard input" label was wrong and there is no backend cause. Reverts to correct mood-gated blend selection in cActionSelectorPC::TryWalk. Revert: remove the leading //
 	//Patch4();  REMOVED 2026-06-06: op-var 89 served + CLIENT-FETCHED (backend log: "Received Request OpsProtocolService MethodID=19" at lobby time, before the match/DNA-mgr ctor) -> cDNAManager::bCanSendEvent latches true on its own from GetOpVarValue(89). Revert: remove the leading //   //cDNAManager::bCanSendEvent — RE-ENABLED with Patch2 (couldn't isolate which removal caused the stall without an A/B test; restoring both to recover the deploy-screen state)
 	// Patch5/6/7 DISABLED — they forced the client into the dedicated-server entity-init path,
@@ -310,6 +310,17 @@ void DetourMain()
 	//OnPeerConnectionPatch();
 	//IsServerPatch();
 	//GetPeerIndexPatch();
+	// TEMP capture-probe (NOT Patch2): detour GetRPPrice to log the null-TemplateItem ItemID + safe-return 0.0,
+	// so the lobby loads enough to capture the runtime id(s) Patch2 was masking. Removed after the server seed.
+	org_GetRPPrice = (double(__cdecl*)(void*,void*,int,float)) DetourFunction((PBYTE)(baseAddressAI + 0x1A2FB0), (PBYTE)GetRPPrice_guard);
+	Log("Installed GetRPPrice capture-probe (TEMP; logs null-TemplateItem ItemID, safe-returns 0.0)\n");
+	// TEMP spawn-crash capture-probe (read-only): hook clean DBG_ucGetFileType to log the non-GAO key that
+	// cObjectManager::LoadObjectTemplate chokes on at spawn ("Loading Wrong Type ?"). Removed after server fix.
+	g_aiBase = (DWORD)baseAddressAI;
+	org_DBG_ucGetFileType = (BYTE(__cdecl*)(DWORD)) DetourFunction((PBYTE)(baseAddressAI + 0x3D540), (PBYTE)DBG_ucGetFileType_probe);
+	org_rev_SendErrorMessage = (int(__cdecl*)(int,char*,char*,int,char*)) DetourFunction((PBYTE)(baseAddressAI + 0x13F0), (PBYTE)rev_SendErrorMessage_probe);
+	org_bTestBigKeyByType = (char(__cdecl*)(int,int)) DetourFunction((PBYTE)(baseAddressAI + 0x3D970), (PBYTE)bTestBigKeyByType_probe);
+	Log("Installed assert-854 + GetFileType-remember + bTestBigKeyByType(key=0) probes (TEMP)\n");
 	ExportPlayerAddress();
 	if(FileExists("_ci_diag_"))		//drop an empty "_ci_diag_" file in the game dir to log ClassInfo store/lookup keys
 		DetourClassInfoDiag();
@@ -321,6 +332,11 @@ void DetourMain()
 		DetourDeployDiag();
 	if(FileExists("_customizediag_"))	//drop an empty "_customizediag_" file to log the weapon-customize store-functor lookups + GetAttachCompType compat results (splits "no attachments offered" into functor-empty vs compat-reject).
 		DetourCustomizeDiag();
+	if(FileExists("_rcdiag_"))		//drop an empty "_rcdiag_" file to log the LOCAL pawn's ReplicationCallback (RC index 12 = m_Mood->UpdateMood). READ-ONLY; confirms whether a server 0x98 reaches RC(12).
+	{
+		org_RC_diag = (char(__fastcall*)(void*, void*, int)) DetourFunction((PBYTE)(baseAddressAI + 0xCB24C), (PBYTE)RC_diag);
+		Log("Hooked AI_EntityPlayer::ReplicationCallback (RC diag)\n");
+	}
 	//ReplaceVelocity();
 	//ZEN_Init(baseAddressAI);
 }
@@ -466,4 +482,10 @@ void DetourCustomizeDiag()
 	Log("Hooked GetFunctorsFromList (customize diag)\n");
 	org_GetAttachCompType_diag = (signed int(__fastcall*)(void*,void*,int)) DetourFunction((PBYTE)(baseAddressAI + 0x121D10), (PBYTE)GetAttachCompType_diag);
 	Log("Hooked AI_WeaponCustomizeHelper::GetAttachCompType (customize diag)\n");
+	// [CZT] template-mode diag: who forces SetUseTemplate(1) + the bUseTemplate state at slot-draw, to find
+	// whether/how the editable (non-template) customize entry is reachable.
+	org_SetUseTemplate_diag = (char(__fastcall*)(void*,void*,char)) DetourFunction((PBYTE)(baseAddressAI + 0x121A20), (PBYTE)SetUseTemplate_diag);
+	Log("Hooked AI_WeaponCustomizeHelper::SetUseTemplate (customize diag)\n");
+	org_IsDetachable_diag = (bool(__fastcall*)(void*,void*,int)) DetourFunction((PBYTE)(baseAddressAI + 0x121D90), (PBYTE)IsDetachable_diag);
+	Log("Hooked AI_WeaponCustomizeHelper::IsDetachable (customize diag)\n");
 }

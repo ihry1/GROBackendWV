@@ -12,6 +12,7 @@ namespace QuazalWV
         public byte msgType = 0xA;
         public ushort msgID;
         public List<BM_Param> paramList = new List<BM_Param>();
+        public static int g_cap99 = 0;   // [walk-fix TEMP] 0x99 capture counter (cap to bound the brief disk I/O)
         public static byte[] Make(BM_Message msg)
         {
             MemoryStream m = new MemoryStream();
@@ -63,6 +64,18 @@ namespace QuazalWV
                     ushort size = Helper.ReadU16LE(s);
                     byte[] payload = new byte[size];
                     s.Read(payload, 0, size);
+                    // [0x99 CAPTURE -- walk-fix TEMP] recover the client's SendReplicaData wire envelope.
+                    // File-based (NO UI writes), RAW payload (pre-retarget), gated on clientReadyHandled so it
+                    // only runs post-spawn (can't lag the spawn handshake like the removed UI capture did), and
+                    // capped at 400 lines. Delete this block + the g_cap99 field after the envelope is decoded.
+                    if (client.clientReadyHandled && g_cap99 < 400)
+                    {
+                        g_cap99++;
+                        try {
+                            System.IO.File.AppendAllText(@"D:\Phoenix\GRO\GRO_0x99_capture.txt",
+                                "#" + g_cap99 + " len=" + size + "  " + BitConverter.ToString(payload).Replace('-', ' ') + "\r\n");
+                        } catch { }
+                    }
                     // (Removed the cycle-1 [0x99] capture logging: those 80 BitConverter hex dumps + UI writes
                     //  flooded the DS UI thread early, so the DS fell seconds behind and lagged the spawn
                     //  handshake. The replica wire format was obtained from the binary instead.)

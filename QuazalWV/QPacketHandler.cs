@@ -159,13 +159,15 @@ namespace QuazalWV
                         if (p.m_oSourceVPort.type == QPacket.STREAMTYPE.OldRVSec)
                         {
                             Log.WriteLine(1, "[" + source + "] [STALLDIAG] >>> RMC.HandlePacket START seq=" + p.uiSeqId);
-                            RMC.HandlePacket(listener, p);
+                            try { RMC.HandlePacket(listener, p); }
+                            catch (Exception ex) { Log.WriteLine(1, "[" + source + "] [HANDLER-EXCEPTION] RMC seq=" + p.uiSeqId + " : " + ex.ToString()); throw; }   // previously this throw was swallowed upstream => silent "START w/o DONE" hang; now it's logged with stack
                             Log.WriteLine(1, "[" + source + "] [STALLDIAG] <<< RMC.HandlePacket DONE seq=" + p.uiSeqId);   // a START with no matching DONE == THIS call hung the receive loop
                         }
                         if (p.m_oSourceVPort.type == QPacket.STREAMTYPE.DO)
                         {
                             Log.WriteLine(1, "[" + source + "] [STALLDIAG] >>> DO.HandlePacket START seq=" + p.uiSeqId);
-                            DO.HandlePacket(listener, p);
+                            try { DO.HandlePacket(listener, p); }
+                            catch (Exception ex) { Log.WriteLine(1, "[" + source + "] [HANDLER-EXCEPTION] DO seq=" + p.uiSeqId + " : " + ex.ToString()); throw; }
                             Log.WriteLine(1, "[" + source + "] [STALLDIAG] <<< DO.HandlePacket DONE seq=" + p.uiSeqId);
                         }
                         break;

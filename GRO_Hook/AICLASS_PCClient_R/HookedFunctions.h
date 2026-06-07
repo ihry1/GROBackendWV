@@ -36,6 +36,121 @@ DWORD (__fastcall* org_UI_DispatchEvent)(EventCaller*, void*, int, int, int);
 DWORD (__fastcall* org_FIR_FireEvent)(void*, void*);
 void (__fastcall* org_AI_EntityPlayer_UpdateWarning)(void*, void*);
 
+// TEMP Patch2-replacement capture-probe (read-only diag): logs the ItemID whose TemplateItem is null
+// (the runtime id GetRPPrice would crash on with Patch2 gone) and safe-returns 0.0 so the lobby loads.
+// Removed once the id is seeded server-side. NOT Patch2 (the blunt ret is gone) -- this finds the real id.
+double (__cdecl* org_GetRPPrice)(void* userItem, void* tempItem, int stackNb, float mult) = 0;
+double __cdecl GetRPPrice_guard(void* userItem, void* tempItem, int stackNb, float mult)
+{
+	if (tempItem == 0)
+	{
+		if (userItem)
+		{
+			DWORD itemId = *(DWORD*)((char*)userItem + 0x10);   // GR5_UserItem.ItemID @ +0x10
+			char buf[160];
+			sprintf(buf, "[RPPRICE-NULL] ItemID=%u has NO TemplateItem (would crash GetRPPrice)\n", itemId);
+			Log(buf);
+		}
+		return 0.0;
+	}
+	return org_GetRPPrice(userItem, tempItem, stackNb, mult);
+}
+
+// TEMP spawn-crash capture-probe (read-only diag): the "Loading Wrong Type ?" assert (errorID 0x356) is
+// raised by FOUR cObjectManager fns (LoadObjectTemplate / bTestBigKeyByType / GetMaterialDuplicate /
+// bTestBigKeyMaterial_0), each checking a key's type via DBG_ucGetFileType. The first probe filtered to
+// LoadObjectTemplate only and caught nothing -> the spawn crash is one of the other three. So: (1) the
+// DBG_ucGetFileType hook just REMEMBERS the last (key,type,caller) -- cheap, no file I/O, no DS-lag; (2) the
+// rev_SendErrorMessage hook fires ONLY on the assert and logs which fn asserted + the remembered bad key.
+// Read-only; removed once the bad key is fixed server-side.
+BYTE (__cdecl* org_DBG_ucGetFileType)(DWORD key) = 0;
+int  (__cdecl* org_rev_SendErrorMessage)(int cond, char* path, char* func, int errorID, char* msg) = 0;
+DWORD g_aiBase = 0;            // baseAddressAI, set at install (for RVA math in the log; not visible in this header)
+volatile DWORD g_lastFT_key = 0;
+volatile DWORD g_lastFT_caller = 0;
+volatile BYTE  g_lastFT_type = 0;
+
+BYTE __cdecl DBG_ucGetFileType_probe(DWORD key)
+{
+	DWORD caller = (DWORD)_ReturnAddress();
+	BYTE ft = org_DBG_ucGetFileType(key);
+	g_lastFT_key = key;          // remember most-recent type-check so the assert hook can name the bad key
+	g_lastFT_type = ft;
+	g_lastFT_caller = caller;
+	return ft;
+}
+
+int __cdecl rev_SendErrorMessage_probe(int cond, char* path, char* func, int errorID, char* msg)
+{
+	if (errorID == 0x356)        // 854 = "Loading Wrong Type ?"
+	{
+		DWORD caller = (DWORD)_ReturnAddress();
+		char buf[320];
+		sprintf(buf, "[ASSERT-854] assertFn_rva=0x%X func=\"%s\" msg=\"%s\" | lastGetFileType key=0x%08X type=0x%02X ftCaller_rva=0x%X\n",
+			caller - g_aiBase, func ? func : "?", msg ? msg : "?",
+			g_lastFT_key, g_lastFT_type, g_lastFT_caller - g_aiBase);
+		Log(buf);
+	}
+	return org_rev_SendErrorMessage(cond, path, func, errorID, msg);
+}
+
+// Pin WHO passes key=0 to bTestBigKeyByType (clean entry 0x1003d970) -- the create/load path with the missing
+// asset -- plus the expected asset type. caller_rva -> the function to map back to the bad create-blob field.
+char (__cdecl* org_bTestBigKeyByType)(int key, int fileType) = 0;
+char __cdecl bTestBigKeyByType_probe(int key, int fileType)
+{
+	if (key == 0)
+	{
+		// Walk the ebp chain + each frame's first stack arg. The UI3DLootVisualContainer-ctor frame's a0 is the
+		// bad item's ItemID (Create->GetUserItemForSlot->userItem+0x10); the Create frame's a0 is the slot.
+		char buf[420];
+		int len = sprintf(buf, "[BTK-ZERO] expectedType=0x%X stack:", (unsigned)fileType);
+		len += sprintf(buf + len, " 0x%X", ((DWORD)_ReturnAddress()) - g_aiBase);   // c1 = LoadTemplateAsync call site
+		__try
+		{
+			DWORD ebp = (DWORD)_AddressOfReturnAddress() - 4;   // this frame's ebp
+			for (int i = 0; i < 7; i++)
+			{
+				DWORD next = *(DWORD*)ebp;                        // caller's saved ebp
+				if (next <= ebp || next > ebp + 0x40000) break;  // sane, monotonically-rising frames only
+				DWORD ret = *(DWORD*)(next + 4);                 // that frame's return address
+				DWORD a0  = *(DWORD*)(next + 8);                 // that frame's first stack arg (loot-ctor a0 = ItemID)
+				ebp = next;
+				if (ret > g_aiBase && ret < g_aiBase + 0x400000)
+					len += sprintf(buf + len, " 0x%X(a0=%X)", ret - g_aiBase, a0);
+				else { len += sprintf(buf + len, " [ext]"); break; }
+			}
+		}
+		__except (1) { len += sprintf(buf + len, " <fault>"); }
+		sprintf(buf + len, "\n");
+		Log(buf);
+		// Dump the userItem the deploy actually reads at slot 0: replicate InventoryModel::GetUserItemForSlot(0)
+		// via the global @ aiBase+0x6A4590 -> vtable[0] (__thiscall). inventoryid/itemtype identify whether slot 0
+		// holds the deleted phantom (inventoryid 2002 == stale client cache), a different item, or a synthesized record.
+		__try
+		{
+			DWORD inv = *(DWORD*)(g_aiBase + 0x6A4590);
+			if (inv)
+			{
+				DWORD vt = *(DWORD*)inv;
+				void* (__thiscall* getItem)(void*, int) = (void* (__thiscall*)(void*, int))(*(DWORD*)vt);
+				DWORD* ui = (DWORD*)getItem((void*)inv, 0);
+				if (ui)
+				{
+					char ub[220];
+					sprintf(ub, "[USERITEM-0] ptr=0x%08X : %08X %08X %08X %08X %08X(ItemID@+10) %08X %08X %08X\n",
+						(DWORD)ui, ui[0], ui[1], ui[2], ui[3], ui[4], ui[5], ui[6], ui[7]);
+					Log(ub);
+				}
+				else Log("[USERITEM-0] getItem(slot 0) = NULL\n");
+			}
+			else Log("[USERITEM-0] InventoryModel global = NULL\n");
+		}
+		__except (1) { Log("[USERITEM-0] <fault dumping userItem>\n"); }
+	}
+	return org_bTestBigKeyByType(key, fileType);
+}
+
 typedef DWORD(__fastcall* BUSEVENTHANDLER)(void*, void*, AIEvent*);
 typedef DWORD(__fastcall* EVENTHANDLER)(void*, void*, DWORD, AIEvent*);
 
@@ -1119,5 +1234,92 @@ signed int __fastcall GetAttachCompType_diag(void* THIS, void* EDX, int compMapK
 		compMapKey, result, (result == -1) ? "  (REJECTED)" : "");
 	Log(buffer);
 	_fxrstor(g_cz_fxbuf);
+	return result;
+}
+
+// [CZT] WHY the customize opens in template (read-only) mode. AI_StorePage/AI_AdWidget are the ONLY
+// callers of SetUseTemplate(1); the editable editor is non-template (bUseTemplate inits 0, Reset clears
+// it). These two hooks reveal (a) who/when forces template, and (b) the bUseTemplate state when the slots
+// are drawn. bUseTemplate @ AI_WeaponCustomizeHelper+0xAC (verified: SetUseTemplate `mov [ecx+0ACh], al`).
+// FP-safe; _ReturnAddress() captures the game call site -> mapped to the AICLASS RVA.
+char (__fastcall* org_SetUseTemplate_diag)(void*, void*, char) = 0;
+bool (__fastcall* org_IsDetachable_diag)(void*, void*, int) = 0;
+
+char __fastcall SetUseTemplate_diag(void* THIS, void* EDX, char val)
+{
+	void* ret = _ReturnAddress();
+	_fxsave(g_cz_fxbuf);
+	DWORD c = (DWORD)ret;
+	DWORD rva = (c >= baseAddressAI && c < baseAddressAI + 0x782000) ? (c - baseAddressAI + 0x10000000) : c;
+	sprintf(buffer, "[CZT] SetUseTemplate=%d caller=0x%08X\n\0", (int)val, rva);
+	Log(buffer);
+	_fxrstor(g_cz_fxbuf);
+	return org_SetUseTemplate_diag(THIS, EDX, val);
+}
+
+bool __fastcall IsDetachable_diag(void* THIS, void* EDX, int slot)
+{
+	bool result = org_IsDetachable_diag(THIS, EDX, slot);
+	if (slot == 0)   // log once per customize draw (slot 0) -- avoids the per-slot flood
+	{
+		_fxsave(g_cz_fxbuf);
+		int tmpl = THIS ? *((unsigned char*)THIS + 0xAC) : -1;
+		sprintf(buffer, "[CZT] IsDetachable(slot0) bUseTemplate=%d -> %d\n\0", tmpl, (int)result);
+		Log(buffer);
+		_fxrstor(g_cz_fxbuf);
+	}
+	return result;
+}
+
+// ============================================================================
+// REPLICATION-CALLBACK DIAGNOSTIC  (installed only when a "_rcdiag_" file exists)
+// ----------------------------------------------------------------------------
+// MAKE-OR-BREAK for the server-side A-pose/walk fix: does an inbound replicated-property update
+// reach AI_EntityPlayer::ReplicationCallback @0x100CB24C on the LOCAL pawn, and does index 12
+// (m_Mood -> AI_EntityHuman::RC case12 -> UpdateMood @0x10076E90) fire? The per-field RC dispatcher
+// is in RDVDLL (Quazal DO layer), so confirm at RUNTIME. The local pawn is a SERVER-mastered SLAVE
+// (owner=0x5c00002=DS, see memory gro-pawn-master-slave), so it SHOULD deserialize server updates +
+// fire RC; this proves it. Read-only: the original is called FIRST (preserves the st0 double arg +
+// runs UpdateMood unchanged for idx12); only the Log is fxsave/fxrstor-bracketed; gated to the LOCAL
+// pawn (playerAddress) and non-12 indices are de-duped (first occurrence only) so it can't flood/lag.
+// __thiscall(this=ecx, st0 double, int a2 on stack) -> __fastcall(this, edx-unused, a2). a2 is the
+// replication property index. Offsets runtime-verified: m_Mood @pawn+0x824, prev-mood @pawn+0xDA8,
+// load-state @pawn+0x1400 (3=banks loaded), gesture-mgr @pawn+0xF6C, dword5CC @mgr+0x5D4.
+char (__fastcall* org_RC_diag)(void*, void*, int) = 0;
+__declspec(align(16)) static unsigned char g_rc_fxbuf[512];
+static unsigned char g_rc_seen[64] = { 0 };   // de-dup non-mood indices
+
+char __fastcall RC_diag(void* THIS, void* EDX, int index)
+{
+	// Only the LOCAL player's pawn (avoid flood from bots / remote pawns / other entities).
+	if (playerAddress == 0 || (DWORD)THIS != playerAddress)
+		return org_RC_diag(THIS, EDX, index);
+
+	DWORD c     = (DWORD)_ReturnAddress();
+	DWORD mgr   = *(DWORD*)((char*)THIS + 0xF6C);
+	DWORD descB = mgr ? *(DWORD*)(mgr + 0x5D4) : 0;     // dword5CC BEFORE
+	DWORD mood  = *(DWORD*)((char*)THIS + 0x824);       // m_Mood.currValue
+	DWORD prev  = *(DWORD*)((char*)THIS + 0xDA8);       // prev-mood
+	DWORD load  = *(DWORD*)((char*)THIS + 0x1400);      // visual load-state (3 = banks loaded)
+
+	char result = org_RC_diag(THIS, EDX, index);        // run original (st0 intact) -> UpdateMood for idx12
+
+	DWORD descA = mgr ? *(DWORD*)(mgr + 0x5D4) : 0;     // dword5CC AFTER
+
+	bool doLog = (index == 12);
+	if (!doLog && index >= 0 && index < 64 && !g_rc_seen[index]) { g_rc_seen[index] = 1; doLog = true; }
+	if (doLog)
+	{
+		// caller as an AICLASS RVA when in-module (Order_ChangeMood ~0x1007ABxx = local), else raw
+		// (an RDVDLL address == the DO-layer dispatcher == genuine server replication delivery).
+		DWORD cr = (c >= baseAddressAI && c < baseAddressAI + 0x782000) ? (c - baseAddressAI + 0x10000000) : c;
+		_fxsave(g_rc_fxbuf);
+		sprintf(buffer, "[RC] idx=%d caller=0x%08X mood=0x%X prev=0x%X load=%d desc:0x%08X->0x%08X%s%s\n\0",
+			index, cr, mood, prev, load, descB, descA,
+			(index == 12) ? "  <MOOD>" : "",
+			(descB == 0 && descA != 0) ? "  *** dword5CC SET ***" : "");
+		Log(buffer);
+		_fxrstor(g_rc_fxbuf);
+	}
 	return result;
 }
