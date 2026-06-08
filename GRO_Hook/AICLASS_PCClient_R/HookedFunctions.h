@@ -568,11 +568,25 @@ unsigned int __cdecl RosaceResolve_diag(int rosace, int gestureSet)
 
 void __fastcall UpdateMood_diag(void* THIS, void* EDX)
 {
-	// m_Mood is a cReplicatedFlag (currValue is the bitmask). UpdateMood compares against the
-	// 'prev mood' stored at this[1].m_bReplicatePositionAndAngle. We can't trivially resolve those
-	// offsets from here without the full AI_EntityPlayer layout, so just log entry + return addr.
+	// Fires at AI_EntityHuman::InitEntity's no-op UpdateMood (caller RVA 0x89279) in BOTH the working
+	// and the CRASHING native spawn -- so this is where we capture the spawn-gate state in the FAILING
+	// case (the [MO] hook can't: it only fires when Order_ChangeMood(3) actually runs = gate passed).
+	// serializationFlags @THIS+0x30 (&1=MASTER gates AI_EntityPlayer::InitEntity's Order_ChangeMood(3));
+	// owner/playerStationID @+0x6C; AI_NetworkManager::Instance @global RVA 0x6ACBA4 -> myNetId @+0x170,
+	// InternalOwnerId @+0x16B. If the native crash shows &1=0 here, the gate is why dword5CC stays null.
 	void* caller = _ReturnAddress();
-	sprintf(buffer, "[MOOD] UpdateMood ENTER this=0x%08X caller=0x%08X\n\0", (DWORD)THIS, (DWORD)caller);
+	DWORD sflag = *(DWORD*)((char*)THIS + 0x30);
+	DWORD owner = *(DWORD*)((char*)THIS + 0x6C);
+	DWORD nmInst = *(DWORD*)(baseAddressAI + 0x6ACBA4);
+	DWORD myNet  = nmInst ? *(DWORD*)(nmInst + 0x170) : 0;
+	DWORD intOwn = nmInst ? (*(BYTE*)(nmInst + 0x16B) ? 1u : 0u) : 0;
+	DWORD gao    = *(DWORD*)((char*)THIS + 0x14);       // this->gameObject (GAO)
+	DWORD mmood  = *(DWORD*)((char*)THIS + 0x824);      // m_Mood.currValue (the gameplay flag UpdateMood reads) -- should be 0xCE from LoadFrom, empirically 0
+	DWORD mprev  = *(DWORD*)((char*)THIS + 0xDA8);      // mood-prev (UpdateMood delta basis)
+	DWORD cr = ((DWORD)caller >= baseAddressAI && (DWORD)caller < baseAddressAI + 0x782000)
+		? ((DWORD)caller - baseAddressAI + 0x10000000) : (DWORD)caller;
+	sprintf(buffer, "[MOOD] UpdateMood ENTER this=0x%08X caller=0x%08X(rva0x%X) m_Mood=0x%X prev=0x%X sflag=0x%X &1=%d gameObject=0x%08X intOwn=%d\n\0",
+		(DWORD)THIS, (DWORD)caller, cr, mmood, mprev, sflag, (sflag & 1), gao, intOwn);
 	Log(buffer);
 	org_UpdateMood_diag(THIS, EDX);
 	sprintf(buffer, "[MOOD] UpdateMood LEAVE\n\0");
@@ -1322,4 +1336,147 @@ char __fastcall RC_diag(void* THIS, void* EDX, int index)
 		_fxrstor(g_rc_fxbuf);
 	}
 	return result;
+}
+
+// ============================================================================
+// MOOD-ORDER DIAGNOSTIC  (installed only when a "_moodorder_" file exists)
+// ----------------------------------------------------------------------------
+// Finds WHAT triggers AI_EntityHuman::Order_ChangeMood @0x1007A9E0 (RVA 0x7A9E0) -- the LOCAL,
+// engine-driven mood setter that resolves the A-pose (it cReplicatedFlag::Set/Remove's the mood bit
+// @pawn+0x81C then calls UpdateMood, which sets dword5CC). RE (RE/plan/15) proved doc-14's m_Mood
+// REPLICATION path is a dead end and that this Order_ChangeMood is a VIRTUAL (vtable slot +0xD8) with
+// NO caller inside AICLASS (zero E8 xrefs; zero call[reg+0xD8]/[+0xE0] sites) -> it is invoked from
+// ANOTHER MODULE (the Yeti engine) and RACES the locomotion driver (the ~10% spawn crash). This hook
+// captures, for the LOCAL pawn: the caller's MODULE+offset (expected to be Yeti_Release.exe / AIDLL,
+// NOT AICLASS), the newMood arg, the visual load-state, and the dword5CC 0->nonzero transition (the
+// exact A-pose-resolve moment) -- so we can see the engine trigger + its timing vs the driver, then
+// design a compliant server-side spawn-sequencing fix. READ-ONLY: the original runs FIRST (preserves
+// the st0 double arg + does the real mood change/UpdateMood unchanged); only the Log is
+// fxsave/fxrstor-bracketed; gated to the LOCAL pawn (playerAddress); de-duped by caller (each distinct
+// caller logged once) + always logs the resolve transition, and capped, so it can't flood/lag spawn.
+// Same convention as RC_diag: __userpurge(this=ecx, st0 double, int newMood on stack) -> __fastcall.
+char (__fastcall* org_MoodOrder_diag)(void*, void*, int) = 0;
+__declspec(align(16)) static unsigned char g_mo_fxbuf[512];
+static DWORD g_mo_seenCaller[32] = { 0 };   // de-dup: distinct caller addresses already logged
+static int   g_mo_seenCount = 0;
+static int   g_mo_logged = 0;               // total lines emitted (cap to bound disk I/O)
+
+char __fastcall MoodOrder_diag(void* THIS, void* EDX, int newMood)
+{
+	// NOTE (v2): NOT gated to playerAddress. The 1st test showed the in-match pawn resolves mood via
+	// Order_ChangeMood BEFORE the per-frame hook latches playerAddress (so the old gate skipped it ->
+	// zero [MO] lines). We instead log every DISTINCT caller once + every dword5CC resolve, mark the
+	// LOCAL pawn when known, and rely on the de-dup(32)+cap(120) to stay bounded. THIS is always an
+	// AI_EntityHuman here, so the field reads below are valid for any entity (mgr is null-checked).
+	DWORD pa      = playerAddress;
+	bool  isLocal = (pa != 0 && (DWORD)THIS == pa);
+
+	DWORD c     = (DWORD)_ReturnAddress();              // the call site (RVA 0xD24A0 = AI_EntityPlayer::InitEntity)
+	DWORD mgr   = *(DWORD*)((char*)THIS + 0xF6C);
+	DWORD descB = mgr ? *(DWORD*)(mgr + 0x5D4) : 0;     // dword5CC BEFORE
+	DWORD mood  = *(DWORD*)((char*)THIS + 0x824);       // m_Mood.currValue
+	DWORD prev  = *(DWORD*)((char*)THIS + 0xDA8);       // prev-mood
+	DWORD load  = *(DWORD*)((char*)THIS + 0x1400);      // visual load-state (3 = banks loaded)
+	DWORD sflag = *(DWORD*)((char*)THIS + 0x30);        // serializationFlags (&1=master/local, &2=server-authored) -- gates InitEntity's Order_ChangeMood(3)
+	DWORD owner = *(DWORD*)((char*)THIS + 0x6C);        // playerStationID = the create-message 'owner' (SetMasterFlag stored it)
+	// AI_NetworkManager::Instance @ global RVA 0x6ACBA4; myNetId @ Inst+0x170, InternalOwnerId @ Inst+0x16B.
+	// IsMaster(in-session) = (myNetId == owner); so to reliably set &1 the create owner must == myNetId.
+	DWORD nmInst = *(DWORD*)(baseAddressAI + 0x6ACBA4);
+	DWORD myNet  = nmInst ? *(DWORD*)(nmInst + 0x170) : 0;
+	DWORD intOwn = nmInst ? (*(BYTE*)(nmInst + 0x16B) ? 1u : 0u) : 0;
+
+	char result = org_MoodOrder_diag(THIS, EDX, newMood);   // run original (st0 intact) -> mood change + UpdateMood
+
+	DWORD descA = mgr ? *(DWORD*)(mgr + 0x5D4) : 0;     // dword5CC AFTER
+
+	// Log (a) the first time each distinct caller is seen (to enumerate the engine trigger sites), and
+	// (b) ALWAYS the resolve transition dword5CC 0->nonzero (the A-pose-fixed moment + its timing).
+	bool resolve   = (descB == 0 && descA != 0);
+	bool newCaller = true;
+	for (int i = 0; i < g_mo_seenCount; i++) if (g_mo_seenCaller[i] == c) { newCaller = false; break; }
+	if (newCaller && g_mo_seenCount < 32) g_mo_seenCaller[g_mo_seenCount++] = c;
+
+	if ((newCaller || resolve) && g_mo_logged < 120)
+	{
+		g_mo_logged++;
+		_fxsave(g_mo_fxbuf);
+		// Resolve the caller to module+offset (it is expected to be a Yeti-engine address, NOT AICLASS).
+		// UNCHANGED_REFCOUNT so we never leak a module ref; de-dup keeps these Win32 calls bounded.
+		char modname[64] = "?";
+		DWORD modoff = c;
+		HMODULE hmod = 0;
+		if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+			(LPCSTR)c, &hmod) && hmod)
+		{
+			char full[260];
+			DWORD n = GetModuleFileNameA(hmod, full, sizeof(full));
+			if (n > 0)
+			{
+				// basename: keep everything after the last path separator (no CRT str* dependency)
+				DWORD start = 0, j = 0;
+				for (DWORD i = 0; i < n; i++) if (full[i] == '\\' || full[i] == '/') start = i + 1;
+				for (DWORD i = start; i < n && j < sizeof(modname) - 1; i++) modname[j++] = full[i];
+				modname[j] = 0;
+			}
+			modoff = c - (DWORD)hmod;
+		}
+		sprintf(buffer, "[MO] %s this=0x%08X newMood=%d caller=0x%08X (%s+0x%X) sflag=0x%X owner=0x%08X myNetId=0x%08X intOwn=%d%s mood=0x%X load=%d desc:0x%08X->0x%08X%s\n\0",
+			isLocal ? "LOCAL" : "ent  ", (DWORD)THIS, newMood, c, modname, modoff, sflag, owner, myNet, intOwn,
+			(owner == myNet) ? " MATCH" : " MISMATCH", mood, load, descB, descA,
+			resolve ? "  *** dword5CC SET (A-POSE RESOLVE) ***" : "");
+		Log(buffer);
+		_fxrstor(g_mo_fxbuf);
+	}
+	return result;
+}
+
+// ============================================================================
+// INITENTITY-PROGRESS PINPOINT  (installed with "_deploydiag_")
+// ----------------------------------------------------------------------------
+// The native spawn crashes INSIDE AI_EntityPlayer::InitEntity @0x100D24A0 -- after the no-op UpdateMood
+// (0x100d19fc) but before Order_ChangeMood(3) (0x100d249e); serializationFlags &1=1, NO assert, NO [VEL],
+// NO [MO]. Hook the 4 internal calls (in InitEntity order) and log ENTER (before the original, FP-safe via
+// fxsave/fxrstor so the st0 double arg is preserved) so the LAST [IE] line in the crash log is the call
+// that crashed. Capped per-fn. RVAs off baseAddressAI: DeserializeRDVClassInfo 0x1C7A40, LoadWeapons
+// 0xCEF50, LoadCharacterVisualsAsync 0x1CF450, AI_CameraBase::Init 0x1B1430.
+__declspec(align(16)) static unsigned char g_ie_fxbuf[512];
+static int g_ie_n1 = 0, g_ie_n2 = 0, g_ie_n3 = 0, g_ie_n4 = 0;
+#define IE_LOG(ctr, nm, T) do { if ((ctr) < 16) { (ctr)++; _fxsave(g_ie_fxbuf); \
+	sprintf(buffer, "[IE] " nm " #%d this=0x%08X\n\0", (ctr), (DWORD)(T)); Log(buffer); _fxrstor(g_ie_fxbuf); } } while (0)
+
+// EARLY-InitEntity calls (post no-op, pre DeserRDV) -- the crash is in this window. Each logs the ENTITY
+// arg (the pawn), not the manager `this`, so we can match it to the [MOOD] pawn. RegisterEntityPlayer is
+// __thiscall(mgr, entPlayer); Intels(sub_10033440) is __thiscall(mgr, st0 double, entPlayer) -- st0 is
+// preserved by IE_LOG's fxsave/fxrstor; Buff(sub_1001EEF0) is __thiscall(mgr, entPlayer).
+void (__fastcall* org_IE_RegPlayer)(void*, void*, void*) = 0;
+void __fastcall IE_RegPlayer(void* MGR, void* EDX, void* ent) {
+	IE_LOG(g_ie_n1, "RegisterEntityPlayer", ent); org_IE_RegPlayer(MGR, EDX, ent);
+}
+void (__fastcall* org_IE_Intels)(void*, void*, void*) = 0;
+void __fastcall IE_Intels(void* MGR, void* EDX, void* ent) {
+	IE_LOG(g_ie_n2, "IntelsMgr(sub_10033440)", ent); org_IE_Intels(MGR, EDX, ent);
+}
+void (__fastcall* org_IE_Buff)(void*, void*, void*) = 0;
+void __fastcall IE_Buff(void* MGR, void* EDX, void* ent) {
+	IE_LOG(g_ie_n3, "BuffMgr(sub_1001EEF0)", ent); org_IE_Buff(MGR, EDX, ent);
+}
+
+// m_Mood DESERIALIZE PROBE (installed with "_deploydiag_"): RDC_U32::Read_NR @0x10077c20 is the wire-reader
+// that LoadFrom calls to apply the create blob's m_Mood (this=the RDC = the cReplicatedFlag; m_Mood's is
+// pawn+0x81C, currValue THIS+8 = pawn+0x824). Logs each call's RDC + the value written, to PROVE whether
+// LoadFrom lands m_Mood=0xCE in pawn+0x824 (look for a [RDR] with val=0xCE -> then something resets it
+// before InitEntity). Capped. Read-only (original runs first; log fxsave/fxrstor-bracketed).
+unsigned int (__fastcall* org_ReadNR)(void*, void*, void*) = 0;
+static int g_rdr_n = 0;
+unsigned int __fastcall ReadNR_probe(void* THIS, void* EDX, void* memBuf) {
+	unsigned int r = org_ReadNR(THIS, EDX, memBuf);
+	if (g_rdr_n < 60) {
+		g_rdr_n++;
+		_fxsave(g_ie_fxbuf);
+		sprintf(buffer, "[RDR] Read_NR #%d rdc=0x%08X val=0x%X pawn?=0x%08X\n\0",
+			g_rdr_n, (DWORD)THIS, *(DWORD*)((char*)THIS + 8), (DWORD)THIS - 0x81C);
+		Log(buffer);
+		_fxrstor(g_ie_fxbuf);
+	}
+	return r;
 }

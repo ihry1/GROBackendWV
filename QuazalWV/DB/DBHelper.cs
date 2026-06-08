@@ -411,6 +411,93 @@ namespace QuazalWV
             return result;
         }
 
+        // === Weapon part-customization persistence (StoreService 22/23 "apply") ===
+        // A weapon INSTANCE's chosen component set, keyed by the weapon's useritems.inventoryid, so two
+        // copies of the same weapon can carry different parts. Overrides the by-mapKey DEFAULT
+        // (GetWeaponComponentList) in the inventory + customize-complete responses, so the picked parts
+        // show on the tile/3D-preview and survive relogin.
+        private static bool _customCompTableReady = false;
+        private static void EnsureCustomCompTable()
+        {
+            if (_customCompTableReady) return;
+            try { new SQLiteCommand("CREATE TABLE IF NOT EXISTS weaponcustomcomponents (pid INTEGER, inventoryid INTEGER, components TEXT, PRIMARY KEY(pid, inventoryid))", connection).ExecuteNonQuery(); }
+            catch { }
+            _customCompTableReady = true;
+        }
+
+        // itemid (== mapKey) of a useritems row by its inventoryid, or 0.
+        public static uint GetItemIdByInventoryId(uint inventoryId)
+        {
+            List<List<string>> r = GetQueryResults("SELECT itemid FROM useritems WHERE inventoryid=" + inventoryId);
+            return r.Count > 0 ? SafeU32(r[0][0]) : 0;
+        }
+
+        // The inventoryid sitting in (persona, bagtype, slotid), or 0 (generic, any-bag form).
+        public static uint ResolveInventoryIdBySlot(uint pid, uint bagType, uint slotId)
+        {
+            int bagId = GetBagId(pid, bagType);
+            if (bagId < 0) return 0;
+            return GetSlotInventoryId(bagId, slotId);
+        }
+
+        // componentType keyed by component mapKey (one query), to merge a customize delta by slot/type.
+        private static Dictionary<uint, uint> GetComponentTypeMap()
+        {
+            Dictionary<uint, uint> map = new Dictionary<uint, uint>();
+            foreach (List<string> e in GetQueryResults("SELECT mapKey,type FROM components"))
+                map[SafeU32(e[0])] = SafeU32(e[1]);
+            return map;
+        }
+
+        // Merge a customize pick-list (the CHANGED components) over the weapon's DEFAULT component list:
+        // each chosen component REPLACES the default of the same componentType (or is added if the weapon
+        // had none of that type). Returns the FULL component set the weapon should now show/build with.
+        public static List<uint> BuildMergedComponentList(uint weaponMapKey, List<uint> chosenComps)
+        {
+            List<uint> defaults = GetWeaponComponentList(weaponMapKey);
+            if (chosenComps == null || chosenComps.Count == 0) return defaults;
+            Dictionary<uint, uint> typeOf = GetComponentTypeMap();
+            HashSet<uint> chosenTypes = new HashSet<uint>();
+            foreach (uint c in chosenComps)
+                chosenTypes.Add(typeOf.ContainsKey(c) ? typeOf[c] : 0xFFFFFFFFu);
+            List<uint> merged = new List<uint>();
+            foreach (uint d in defaults)
+            {
+                uint dt = typeOf.ContainsKey(d) ? typeOf[d] : 0xFFFFFFFFu;
+                if (!chosenTypes.Contains(dt)) merged.Add(d);
+            }
+            merged.AddRange(chosenComps);
+            return merged;
+        }
+
+        // Persist a weapon instance's custom component list (overwrites any prior set for that inventoryid).
+        public static void SaveCustomWeaponComponents(uint pid, uint inventoryId, List<uint> components)
+        {
+            EnsureCustomCompTable();
+            string csv = string.Join(",", components);
+            try { new SQLiteCommand("INSERT OR REPLACE INTO weaponcustomcomponents (pid,inventoryid,components) VALUES (" + pid + "," + inventoryId + ",'" + csv + "')", connection).ExecuteNonQuery(); }
+            catch { }
+        }
+
+        // The component list to SERVE for a weapon instance: the persisted CUSTOM set if the player has
+        // customized this exact inventoryid, else the by-mapKey default. Safe on DBs lacking the table.
+        public static List<uint> GetWeaponComponentListForInstance(uint pid, uint inventoryId, uint weaponMapKey)
+        {
+            try
+            {
+                List<List<string>> r = GetQueryResults("SELECT components FROM weaponcustomcomponents WHERE pid=" + pid + " AND inventoryid=" + inventoryId);
+                if (r.Count > 0 && !string.IsNullOrEmpty(r[0][0]))
+                {
+                    List<uint> list = new List<uint>();
+                    foreach (string x in r[0][0].Split(','))
+                        if (x.Length > 0) list.Add(SafeU32(x));
+                    if (list.Count > 0) return list;
+                }
+            }
+            catch { }
+            return GetWeaponComponentList(weaponMapKey);
+        }
+
         // Oasis localization name id for an item/weapon, by templateitems.iid (== weapon mapKey).
         public static uint GetItemOasisName(uint iid)
         {

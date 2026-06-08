@@ -121,6 +121,7 @@ namespace QuazalWV
                         Log.WriteLine(1, "[DS] spawn loadout: pid=" + client.PID + " primary=" + _primary + " secondary=" + _secondary);
                         if (_primary != 0) _pe.mainWeaponID = _primary;
                         if (_secondary != 0) _pe.pistolWeaponID = _secondary;
+                        _pe.pid = client.PID;   // build the player's PERSISTED custom weapon parts (StoreService 22/23) in-match; 0-safe -> defaults
                         msgs.Add(DO_RMCRequestMessage.Create(client.callCounterDO_RMC++,
                             0x1006,
                             new DupObj(DupObjClass.Station, 1),

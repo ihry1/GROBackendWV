@@ -29,9 +29,12 @@ namespace QuazalWV
             // weapon's InventoryID unmapped -> no component list -> no weapon model -> the perpetual
             // loading spinner. Map each owned weapon's InventoryID -> its component list
             // (tempcomponentlists, keyed by mapKey == the weapon's ItemID; e.g. 170=M27, 339=P250).
+            // Per-instance CUSTOM component list when the weapon has been customized (StoreService 22/23
+            // persisted it, keyed by InventoryID), else the by-mapKey default -> the tile/3D-preview shows
+            // the player's chosen parts and they survive relogin.
             foreach (GR5_UserItem ui in items)
                 if (ui.ItemType == 2)
-                    weaponConfig.Add(new GR5_WeaponConfiguration { unk1 = ui.InventoryID, unk2 = DBHelper.GetWeaponComponentList(ui.ItemID) });
+                    weaponConfig.Add(new GR5_WeaponConfiguration { unk1 = ui.InventoryID, unk2 = DBHelper.GetWeaponComponentListForInstance(client.PID, ui.InventoryID, ui.ItemID) });
         }
 
         public override byte[] ToBuffer()

@@ -131,9 +131,34 @@ namespace QuazalWV
                             + " SkuComps=[" + string.Join(",", attachInit.ComponentSkuData.Select(c => c.SkuId)) + "]"
                             + " InvComps=[" + string.Join(",", attachInit.ComponentInventorySlotIds) + "]"
                             + " Coupons=[" + string.Join(",", attachInit.CouponIds) + "]", Color.Cyan);
-                        // Capture build: record a no-cost transaction so the 2-phase flow proceeds (the
-                        // client gets a trId, then sends the Complete). NO persistence yet -- the encoding
-                        // of InvComps is being captured first. Persist lands in the follow-up build.
+                        // Build-2 PERSIST: resolve the owned weapon (loadout bag/slot) + the chosen owned
+                        // components (their grid slot ids), merge the picks over the weapon's defaults, and
+                        // save the per-instance custom list. Served back by method 23 + GetUserInventoryByBagType
+                        // so the tile/preview reflect the swap and it survives relogin. (SkuComps = bought-new
+                        // components, empty in the owned-swap path; handled in a follow-up.)
+                        try
+                        {
+                            uint weaponInvId = DBHelper.ResolveInventoryIdBySlot(client.PID, attachInit.WeaponBagType, attachInit.WeaponSlotID);
+                            uint weaponMapKey = DBHelper.GetItemIdByInventoryId(weaponInvId);
+                            if (weaponInvId != 0 && weaponMapKey != 0)
+                            {
+                                List<uint> chosen = new List<uint>();
+                                foreach (uint compSlotId in attachInit.ComponentInventorySlotIds)
+                                {
+                                    uint compInvId = DBHelper.ResolveInventoryIdBySlot(client.PID, 0, compSlotId); // owned comps live in the grid (bagtype 0)
+                                    uint compMapKey = DBHelper.GetItemIdByInventoryId(compInvId);
+                                    if (compMapKey != 0) chosen.Add(compMapKey);
+                                }
+                                List<uint> merged = DBHelper.BuildMergedComponentList(weaponMapKey, chosen);
+                                DBHelper.SaveCustomWeaponComponents(client.PID, weaponInvId, merged);
+                                Log.WriteLine(1, "[RMC Store][PERSIST] weaponInvId=" + weaponInvId + " mapKey=" + weaponMapKey
+                                    + " chosen=[" + string.Join(",", chosen) + "] merged=[" + string.Join(",", merged) + "]", Color.Lime);
+                            }
+                            else
+                                Log.WriteLine(1, "[RMC Store][PERSIST] skipped: weapon not resolved (bag=" + attachInit.WeaponBagType + " slot=" + attachInit.WeaponSlotID + " invId=" + weaponInvId + ")", Color.Orange);
+                        }
+                        catch (Exception ex) { Log.WriteLine(1, "[RMC Store][PERSIST] ERROR: " + ex.Message, Color.Red); }
+                        // record a no-cost transaction so the 2-phase flow proceeds (client gets a trId, then Complete).
                         trId = TransactionModel.SaveTransactionRaw(client.PID, TransactionType.BuyAndAttachComponents);
                         reply = new RMCPacketResponseStoreService_InitiateBuyWeaponAndAttachComponents(trId);
                         RMC.SendResponseWithACK(client.udp, p, rmc, client, reply);
@@ -201,15 +226,15 @@ namespace QuazalWV
         }
 
         // Current inventory + per-owned-weapon component lists (keyed by InventoryID), the standard
-        // CompleteBuy*AndAttach* reply shape. Serves the DEFAULT component lists for now; the follow-up
-        // build overrides with the persisted per-instance custom list once the wire encoding is locked.
+        // CompleteBuy*AndAttach* reply shape. Serves the persisted per-instance CUSTOM list when the player
+        // has customized that weapon instance (GetWeaponComponentListForInstance), else the by-mapKey default.
         private static RMCPacketResponseStoreService_CompleteBuyWeaponAndAttachComponents BuildAttachCompleteResponse(ClientInfo client)
         {
             var r = new RMCPacketResponseStoreService_CompleteBuyWeaponAndAttachComponents();
             r.Inventory = DBHelper.GetAllUserItems(client.PID);
             foreach (GR5_UserItem ui in r.Inventory)
                 if (ui.ItemType == 2)
-                    r.UserComponentLists.Add(new Map_U32_VectorU32 { key = ui.InventoryID, vector = DBHelper.GetWeaponComponentList(ui.ItemID) });
+                    r.UserComponentLists.Add(new Map_U32_VectorU32 { key = ui.InventoryID, vector = DBHelper.GetWeaponComponentListForInstance(client.PID, ui.InventoryID, ui.ItemID) });
             return r;
         }
 

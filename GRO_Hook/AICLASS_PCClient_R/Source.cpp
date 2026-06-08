@@ -293,7 +293,7 @@ void DetourMain()
 	}
 	else
 	{
-		Patch1();  //crash1 [KEPT 2026-06-06: removal CRASHED -- sub_100ECC30 ticks at EARLY spawn (state 2) BEFORE the in-match pawn's dword5CC resolves; round-driving populates it only at state 3+ (too late). Real fix = drive dword5CC population BEFORE the locomotion driver's first tick (early server-driven mood/state update / create-deploy sequencing)]  WAS-REMOVED 2026-06-06: server-side round-driving (DS sends BM 900 StartRound after ClientReady) repopulates dword5CC post-load -- in an ACTIVE ROUND, aim/move/crouch produce mood deltas -> UpdateMood re-fires -> rosace resolver succeeds (banks loaded) -> dword5CC set. Diag (_gesture_diag_+_deploydiag_, NO _moodfix_/_walktest_): descSeen=1 on every post-deploy frame, zero null-descriptor frames. sub_100ECC30 now runs natively with a valid descriptor -> real walk, no crash. Revert: remove the leading //  //crash1 (AI_EntityHumanModel anim dword5CC null-deref — client anim init-ordering)
+		//Patch1(); // REMOVED 2026-06-07: committing to the server-side m_Mood-replication fix (plan: RE/plan/12-mood-replication-serverside.md). _walktest_ guard kept as the interim; native fallback (no _walktest_) crashes until the server fix lands.  //crash1 [KEPT 2026-06-06: removal CRASHED -- sub_100ECC30 ticks at EARLY spawn (state 2) BEFORE the in-match pawn's dword5CC resolves; round-driving populates it only at state 3+ (too late). Real fix = drive dword5CC population BEFORE the locomotion driver's first tick (early server-driven mood/state update / create-deploy sequencing)]  WAS-REMOVED 2026-06-06: server-side round-driving (DS sends BM 900 StartRound after ClientReady) repopulates dword5CC post-load -- in an ACTIVE ROUND, aim/move/crouch produce mood deltas -> UpdateMood re-fires -> rosace resolver succeeds (banks loaded) -> dword5CC set. Diag (_gesture_diag_+_deploydiag_, NO _moodfix_/_walktest_): descSeen=1 on every post-deploy frame, zero null-descriptor frames. sub_100ECC30 now runs natively with a valid descriptor -> real walk, no crash. Revert: remove the leading //  //crash1 (AI_EntityHumanModel anim dword5CC null-deref — client anim init-ordering)
 	}
 	//Patch2();  REMOVED 2026-06-06: seeded templateitems (type=4, dtype=0) for the 202 uncovered weapon-components (iid 10128-11014) that GetTemplateItemForSlot returned null for -> GetRPPrice now receives a valid tempItem, no null-deref. Revert: remove leading // (and DELETE the seeded component rows from templateitems). orig: //crash2 — RE-ENABLED: removing it regressed the client. DS reached DO Migration but the client never sent AskForSynchronize (0xA3) -> stuck "connecting to match server". The in-match-load path still hits GR5_UserItem::GetRPPrice; the data-coverage argument wasn't sufficient.
 	//Patch3();  REMOVED 2026-06-06: IDA-verified COSMETIC -- SetMovementAnimation (0x10078780) only sets the move-start anim BLEND LENGTH (SetAnimationLength), never movement; the "keyboard input" label was wrong and there is no backend cause. Reverts to correct mood-gated blend selection in cActionSelectorPC::TryWalk. Revert: remove the leading //
@@ -310,18 +310,27 @@ void DetourMain()
 	//OnPeerConnectionPatch();
 	//IsServerPatch();
 	//GetPeerIndexPatch();
-	// TEMP capture-probe (NOT Patch2): detour GetRPPrice to log the null-TemplateItem ItemID + safe-return 0.0,
-	// so the lobby loads enough to capture the runtime id(s) Patch2 was masking. Removed after the server seed.
-	org_GetRPPrice = (double(__cdecl*)(void*,void*,int,float)) DetourFunction((PBYTE)(baseAddressAI + 0x1A2FB0), (PBYTE)GetRPPrice_guard);
-	Log("Installed GetRPPrice capture-probe (TEMP; logs null-TemplateItem ItemID, safe-returns 0.0)\n");
-	// TEMP spawn-crash capture-probe (read-only): hook clean DBG_ucGetFileType to log the non-GAO key that
-	// cObjectManager::LoadObjectTemplate chokes on at spawn ("Loading Wrong Type ?"). Removed after server fix.
+	// GetRPPrice guard REMOVED 2026-06-07: PROVEN vestigial -> client runs native (NO-CLIENT-PATCH). Only caller is
+	// the Scaleform inventory-item UI converter cASObjectConvertor::CreateASObjectItem::UserItem @0x101671bf, which
+	// passes v9 = RDV InventoryModel::GetTemplateItemForSlot(userItem->ItemID) UNGUARDED to GR5_UserItem::GetRPPrice
+	// @0x101A2FB0 (derefs tempItem->durabilityType -> null-crash). The server-side templateitems seed covers every
+	// owned ItemID: this guard logged ZERO [RPPRICE-NULL] across lobby inventory + loadout + store + in-game loadout
+	// + match-load + spawn. If some future item ever nulls, the COMPLIANT fix is a server-side templateitems row for
+	// that ItemID (temporarily re-arm this hook's logging to capture it) -- NOT a re-patch.
+	//org_GetRPPrice = (double(__cdecl*)(void*,void*,int,float)) DetourFunction((PBYTE)(baseAddressAI + 0x1A2FB0), (PBYTE)GetRPPrice_guard);
+	//Log("Installed GetRPPrice capture-probe (TEMP; logs null-TemplateItem ItemID, safe-returns 0.0)\n");
+	// ★ FINAL STRIP 2026-06-07: A-pose (m_Mood/camPitch create-blob) + GetRPPrice (templateitems coverage) root
+	// causes are fixed SERVER-SIDE, so the last always-on hooks are disabled -- the TEMP spawn-crash probes
+	// (DBG_ucGetFileType / rev_SendErrorMessage / bTestBigKeyByType) and ExportPlayerAddress->UpdateWarning, all
+	// read-only. DetourMain now installs ZERO detours by default => this proxy is retail client behavior. The
+	// flag-gated read-only diagnostics below stay in the source (dormant; re-arm by dropping the matching _*_ flag
+	// file in the game dir) for future RE, but NO flag file is shipped. g_aiBase kept (harmless).
 	g_aiBase = (DWORD)baseAddressAI;
-	org_DBG_ucGetFileType = (BYTE(__cdecl*)(DWORD)) DetourFunction((PBYTE)(baseAddressAI + 0x3D540), (PBYTE)DBG_ucGetFileType_probe);
-	org_rev_SendErrorMessage = (int(__cdecl*)(int,char*,char*,int,char*)) DetourFunction((PBYTE)(baseAddressAI + 0x13F0), (PBYTE)rev_SendErrorMessage_probe);
-	org_bTestBigKeyByType = (char(__cdecl*)(int,int)) DetourFunction((PBYTE)(baseAddressAI + 0x3D970), (PBYTE)bTestBigKeyByType_probe);
-	Log("Installed assert-854 + GetFileType-remember + bTestBigKeyByType(key=0) probes (TEMP)\n");
-	ExportPlayerAddress();
+	//org_DBG_ucGetFileType = (BYTE(__cdecl*)(DWORD)) DetourFunction((PBYTE)(baseAddressAI + 0x3D540), (PBYTE)DBG_ucGetFileType_probe);
+	//org_rev_SendErrorMessage = (int(__cdecl*)(int,char*,char*,int,char*)) DetourFunction((PBYTE)(baseAddressAI + 0x13F0), (PBYTE)rev_SendErrorMessage_probe);
+	//org_bTestBigKeyByType = (char(__cdecl*)(int,int)) DetourFunction((PBYTE)(baseAddressAI + 0x3D970), (PBYTE)bTestBigKeyByType_probe);
+	//Log("Installed assert-854 + GetFileType-remember + bTestBigKeyByType(key=0) probes (TEMP)\n");
+	//ExportPlayerAddress();
 	if(FileExists("_ci_diag_"))		//drop an empty "_ci_diag_" file in the game dir to log ClassInfo store/lookup keys
 		DetourClassInfoDiag();
 	if(FileExists("_gesture_diag_"))	//drop an empty "_gesture_diag_" file to log gesture/mood/dword5CC (A-pose) activity
@@ -329,13 +338,28 @@ void DetourMain()
 	if(FileExists("_moodfix_"))		//drop an empty "_moodfix_" file to re-fire UpdateMood once anim banks finish loading (fixes A-pose). Integer-only hook; no logging.
 		DetourMoodFix();
 	if(FileExists("_deploydiag_"))	//drop an empty "_deploydiag_" file to log (on-change) the deploy-ramp gate state for the local pawn. FP-safe (fxsave/fxrstor-bracketed, integer-only path).
+	{
 		DetourDeployDiag();
+		// [IE] EARLY-InitEntity pinpoint: last [IE] before the crash = the call that crashed (crash window is
+		// post no-op @0x100d19fc -> pre DeserRDV @0x100d1d3e). If all 3 log + [MOOD] gameObject=0 -> the crash
+		// is the AIDLL gameObject derefs (AI_ExecuteEveryTrame/VIS_SetLODBias) on a null GAO.
+		org_IE_RegPlayer = (void(__fastcall*)(void*,void*,void*)) DetourFunction((PBYTE)(baseAddressAI + 0x38E90), (PBYTE)IE_RegPlayer);
+		org_IE_Intels    = (void(__fastcall*)(void*,void*,void*)) DetourFunction((PBYTE)(baseAddressAI + 0x33440), (PBYTE)IE_Intels);
+		org_IE_Buff      = (void(__fastcall*)(void*,void*,void*)) DetourFunction((PBYTE)(baseAddressAI + 0x1EEF0), (PBYTE)IE_Buff);
+		org_ReadNR       = (unsigned int(__fastcall*)(void*,void*,void*)) DetourFunction((PBYTE)(baseAddressAI + 0x77C20), (PBYTE)ReadNR_probe);
+		Log("Installed [IE] early-InitEntity pinpoint hooks + [RDR] m_Mood Read_NR probe\n");
+	}
 	if(FileExists("_customizediag_"))	//drop an empty "_customizediag_" file to log the weapon-customize store-functor lookups + GetAttachCompType compat results (splits "no attachments offered" into functor-empty vs compat-reject).
 		DetourCustomizeDiag();
 	if(FileExists("_rcdiag_"))		//drop an empty "_rcdiag_" file to log the LOCAL pawn's ReplicationCallback (RC index 12 = m_Mood->UpdateMood). READ-ONLY; confirms whether a server 0x98 reaches RC(12).
 	{
 		org_RC_diag = (char(__fastcall*)(void*, void*, int)) DetourFunction((PBYTE)(baseAddressAI + 0xCB24C), (PBYTE)RC_diag);
 		Log("Hooked AI_EntityPlayer::ReplicationCallback (RC diag)\n");
+	}
+	if(FileExists("_moodorder_"))	//drop an empty "_moodorder_" file to log WHO (engine module+offset) triggers the LOCAL pawn's Order_ChangeMood mood-resolve + the dword5CC timing vs the locomotion driver. READ-ONLY.
+	{
+		org_MoodOrder_diag = (char(__fastcall*)(void*, void*, int)) DetourFunction((PBYTE)(baseAddressAI + 0x7A9E0), (PBYTE)MoodOrder_diag);
+		Log("Hooked AI_EntityHuman::Order_ChangeMood (mood-order diag)\n");
 	}
 	//ReplaceVelocity();
 	//ZEN_Init(baseAddressAI);

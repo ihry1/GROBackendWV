@@ -61,6 +61,7 @@ namespace QuazalWV
         public float Health = 100f;
         public uint mainWeaponID = 170;  // M27 D10RS (Assault default rifle) — real RoF/tracer props; "Test" 1000 had ~zero -> sporadic/slow tracers
         public uint pistolWeaponID = 339; // P250 (secondary). Was reusing mainWeaponID, so both slots were the M27.
+        public uint pid = 0;               // owner persona, set by Entitiy_CMD; drives per-instance custom weapon parts (0 = defaults). NOT serialized.
 
         public OCP_PlayerEntity(uint h)
         {
@@ -74,10 +75,23 @@ namespace QuazalWV
             // ---- AI_Entity::LoadFrom : handle (u32 BE) ----
             Helper.WriteU32LE(m, handle);
 
-            // ================= Block1 (serialStruct1) : 34 fields =================
-            // header: size=ceil(34/8)=5, size2=34, 5 zero mask bytes (all fields present)
+            // ================= Block1 (serialStruct1) : 33 fields =================
+            // ★ m_ReplicatedCamPitch is NOT a Block1 field. Its RDC flag bit3(0x8) is CLEAR at
+            //   registration (AI_EntityHuman ctor @0x1008530e: m_ReplicatedCamPitch.flags &= 0xFFFFFFC0),
+            //   and AI_Entity::RegisterReplicatedData(_0) @0x10094020/0x100940b0 routes every
+            //   (flags & 8)==0 field to serialStruct2 (Block2). So campitch lives in Block2 AFTER
+            //   m_PlayerFire (it IS the "trailing 2B" a trace saw). Writing it HERE (the old bug) put
+            //   2 extra bytes in Block1 that shifted m_Mood exactly 2 bytes early -> the client
+            //   deserialized m_Mood = 0x0 (it read [kikoo,kikoo,moodHi,moodHi]=00 00 00 00, with the
+            //   real 00 00 00 CE 2 bytes further on) -> InitEntity's UpdateMood was a no-op -> dword5CC
+            //   stayed null -> A-pose + SetWeaponSide null-deref crash. Proven via [RDR] Read_NR probe
+            //   (val=0x0) + IDA (ctor flags + RegisterReplicatedData block routing).
+            //   FIX is net-zero for ClassInfo: drop campitch here (-2B, count 34->33) and add the
+            //   2-byte Block2 mask header below (+2B) -> every byte from m_ReplicatedPosition onward
+            //   is byte-identical, so weapons/ClassInfo stay aligned while m_Mood now lands 0xCE.
+            // header: size=ceil(33/8)=5, size2=33, 5 zero mask bytes (all fields present)
             Helper.WriteU8(m, 5);
-            Helper.WriteU8(m, 34);
+            Helper.WriteU8(m, 33);
             m.Write(new byte[5], 0, 5);
 
             Helper.WriteU32LE(m, 0);                       //  1 m_CritSalt              u32 BE
@@ -88,44 +102,51 @@ namespace QuazalWV
             Helper.WriteU8(m, 0);                          //  6 m_CurrentWeaponSlot     u8 (0=main)
             Helper.WriteU8(m, 0);                          //  7 m_WantedWeaponSlot      u8
             Helper.WriteU8(m, 0);                          //  8 m_OldWeaponSlot         u8
-            Helper.WriteU16(m, 0);                         //  9 m_ReplicatedCamPitch    u16 LE fixed(x1000)
-            Helper.WriteU8(m, 0);                          // 10 m_GoToPosition          [u8 count]=0
-            Helper.WriteU8(m, (byte)MoveMode.eMoveModeFree); // 11 m_MoveMode            u8 =1 (free)
-            Helper.WriteU32LE(m, 0);                       // 12 m_FocusedEntityReplication u32 BE
-            Helper.WriteU16(m, 0);                         // 13 m_CoverHeight           u16 LE fixed(x2)
-            Helper.WriteU16LE(m, 0);                       // 14 m_CoverFlagWanted       u16 BE =0 (no cover/peek)
-            m.Write(new byte[9], 0, 9);                    // 15 m_CoverNormal           9B compressed vec
-            m.Write(new byte[] { 0x01, 0, 0, 0 }, 0, 4);   // 16 m_State                 4B [01][s3][s2][s0]
-            m.Write(new byte[] { 0x01, 0, 0, 0 }, 0, 4);   // 17 m_StateServer           4B
-            Helper.WriteU8(m, 0);                          // 18 m_LaserSightStateCurr   u8
-            m.Write(new byte[12], 0, 12);                  // 19 m_SlideVelocity         12B compressed vel
-            Helper.WriteU8(m, 0);                          // 20 m_SlideToRosaceAnim     u8
-            Helper.WriteU16(m, 0);                         // 21 m_ADSDamage             u16 LE fixed(x10)
-            Helper.WriteU16(m, 0);                         // 22 m_PostADSDamage         u16 LE fixed(x10)
-            Helper.WriteU8(m, 0);                          // 23 m_bIsInADSCone          u8
-            Helper.WriteU8(m, 1);                          // 24 m_BlitzShieldArmed      u8
-            // 25 m_OrderStatus 13B  [0x0A][b12][b11][10 bytes]
+            Helper.WriteU8(m, 0);                          //  9 m_GoToPosition          [u8 count]=0  (m_ReplicatedCamPitch removed -> Block2)
+            Helper.WriteU8(m, (byte)MoveMode.eMoveModeFree); // 10 m_MoveMode            u8 =1 (free)
+            Helper.WriteU32LE(m, 0);                       // 11 m_FocusedEntityReplication u32 BE
+            Helper.WriteU16(m, 0);                         // 12 m_CoverHeight           u16 LE fixed(x2)
+            Helper.WriteU16LE(m, 0);                       // 13 m_CoverFlagWanted       u16 BE =0 (no cover/peek)
+            m.Write(new byte[9], 0, 9);                    // 14 m_CoverNormal           9B compressed vec (RDC_Vector3D, GetStruct 9)
+            m.Write(new byte[] { 0x01, 0, 0, 0 }, 0, 4);   // 15 m_State                 4B [01][s3][s2][s0]
+            m.Write(new byte[] { 0x01, 0, 0, 0 }, 0, 4);   // 16 m_StateServer           4B
+            Helper.WriteU8(m, 0);                          // 17 m_LaserSightStateCurr   u8
+            m.Write(new byte[12], 0, 12);                  // 18 m_SlideVelocity         12B compressed vel (GetStruct 0xC)
+            Helper.WriteU8(m, 0);                          // 19 m_SlideToRosaceAnim     u8
+            Helper.WriteU16(m, 0);                         // 20 m_ADSDamage             u16 LE fixed(x10)
+            Helper.WriteU16(m, 0);                         // 21 m_PostADSDamage         u16 LE fixed(x10)
+            Helper.WriteU8(m, 0);                          // 22 m_bIsInADSCone          u8
+            Helper.WriteU8(m, 1);                          // 23 m_BlitzShieldArmed      u8
+            // 24 m_OrderStatus 13B  [0x0A][b12][b11][10 bytes]
             m.Write(new byte[] { 0x0A, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 }, 0, 13);
-            Helper.WriteU8(m, 0);                          // 26 m_FireModeType          u8
-            Helper.WriteU8(m, 0);                          // 27 m_RollAnimIndex         u8
-            Helper.WriteU8(m, 0); Helper.WriteU32LE(m, 0); // 28 m_ReplicatedPowerPC     u8 + u32 BE
-            Helper.WriteU16(m, 1000);                      // 29 m_CurrentEnergyPC       u16 LE fixed(x10) = 100.0 ability charge (cPlayerPowerPC inits to 0 + regen is server-only; seed it so the HUD shows charge)
-            Helper.WriteU16LE(m, 0);                       // 30 m_KikooMoveCount        u16 BE
-            Helper.WriteU32LE(m, 0xCE);                    // 31 m_Mood                  u32 BE
-            Helper.WriteU8(m, 0);                          // 32 m_HitPart               u8
-            Helper.WriteU8(m, 0);                          // 33 m_LeftHandSide          u8
-            Helper.WriteU8(m, 1);                          // 34 m_bHealthRegenActive    u8
+            Helper.WriteU8(m, 0);                          // 25 m_FireModeType          u8
+            Helper.WriteU8(m, 0);                          // 26 m_RollAnimIndex         u8
+            Helper.WriteU8(m, 0); Helper.WriteU32LE(m, 0); // 27 m_ReplicatedPowerPC     u8 + u32 BE
+            Helper.WriteU16(m, 1000);                      // 28 m_CurrentEnergyPC       u16 LE fixed(x10) = 100.0 ability charge (cPlayerPowerPC inits to 0 + regen is server-only; seed it so the HUD shows charge)
+            Helper.WriteU16LE(m, 0);                       // 29 m_KikooMoveCount        u16 BE
+            Helper.WriteU32LE(m, 0xCE);                    // 30 m_Mood                  u32 BE  <-- NOW lands at the offset the client reads (campitch no longer shifts it)
+            Helper.WriteU8(m, 0);                          // 31 m_HitPart               u8
+            Helper.WriteU8(m, 0);                          // 32 m_LeftHandSide          u8
+            Helper.WriteU8(m, 1);                          // 33 m_bHealthRegenActive    u8
 
-            // ============== Block2 region: NO second bitarray header ==============
-            // Runtime GetStruct trace proves the client reads these fields UNCONDITIONALLY: it reads
-            // 8,2,8,1,2 starting exactly where the old [01][04][00] header sat. That header was being
-            // consumed as ReplicatedPosition data, shifting every ClassInfo slot by 1 byte (the grenade
-            // parser then overran the pistol slot -> cBuffer.cpp:20 "invalid size"). 21 bytes total.
+            // ============== Block2 region (serialStruct2) : 5 fields, WITH 2-byte header ==============
+            // Block2 = the (flags & 8)==0 fields, in registration order: m_ReplicatedPosition,
+            // m_ReplicatedAngle, m_ShootPosition, m_PlayerFire, m_ReplicatedCamPitch. The client's
+            // DeserializeReplicatedData(0) reads a bitarray header here too: [u8 size][u8 size2]
+            // [size mask bytes]. size=0 => 0 mask bytes => all 5 present.
+            // The OLD "no header" build only worked because the campitch-in-Block1 bug left 2 stray
+            // bytes here (m_LeftHandSide=0, m_bHealthRegenActive=1) that the client consumed as this
+            // header (size=0). With campitch moved out of Block1 those stray bytes are gone, so we
+            // supply [00][05] explicitly -> m_ReplicatedPosition starts at the SAME absolute offset as
+            // before -> the AI_EntityDynamic tail + 9 ClassInfo mem-buffers are byte-identical.
+            // 23 bytes total (2 header + 8,2,8,1,2). Field widths confirmed by GetStruct trace.
+            Helper.WriteU8(m, 0);                          // Block2 mask size = 0 (no mask bytes => all present)
+            Helper.WriteU8(m, 5);                          // Block2 size2 = field count (loop uses client's serialStruct2.replicationCount)
             m.Write(new byte[8], 0, 8);                    //  1 m_ReplicatedPosition    8B
             Helper.WriteU16(m, 0);                         //  2 m_ReplicatedAngle       u16
             m.Write(new byte[8], 0, 8);                    //  3 m_ShootPosition         8B
             Helper.WriteU8(m, 0);                          //  4 m_PlayerFire            u8
-            Helper.WriteU16(m, 0);                         //  5 trailing 2B field the client reads after PlayerFire
+            Helper.WriteU16(m, 0);                         //  5 m_ReplicatedCamPitch    u16 (Block2 field, was double-written in Block1)
 
             // ================= AI_EntityDynamic tail (11B) =================
             // AI_EntityDynamic::LoadFrom reads teamID FIRST then classId; the ClassInfo STORE keys on the
@@ -149,14 +170,14 @@ namespace QuazalWV
                 switch ((ClassInfoMemBuffer)i)
                 {
                     case ClassInfoMemBuffer.eMainWeapon:
-                        ClassInfo_Gun mainRifleInfo = new ClassInfo_Gun(mainWeaponID);
+                        ClassInfo_Gun mainRifleInfo = new ClassInfo_Gun(mainWeaponID, pid, 1); // loadout slot 1 = primary -> its custom parts
                         mainRifleInfo.memBufferSize = Convert.ToByte(mainRifleInfo.MakePayload().Length - 1);
                         buffer = mainRifleInfo.MakePayload();
                         m.Write(buffer, 0, buffer.Length);
                         break;
 
                     case ClassInfoMemBuffer.ePistol:
-                        ClassInfo_Gun pistolInfo = new ClassInfo_Gun(pistolWeaponID);
+                        ClassInfo_Gun pistolInfo = new ClassInfo_Gun(pistolWeaponID, pid, 2); // loadout slot 2 = secondary -> its custom parts
                         pistolInfo.memBufferSize = Convert.ToByte(pistolInfo.MakePayload().Length - 1);
                         buffer = pistolInfo.MakePayload();
                         m.Write(buffer, 0, buffer.Length);
