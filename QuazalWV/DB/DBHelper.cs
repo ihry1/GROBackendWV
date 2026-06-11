@@ -9,6 +9,32 @@ using System.Data.SqlClient;
 
 namespace QuazalWV
 {
+    public class SpawnLoadoutInfo
+    {
+        public byte ClassID;
+        public uint BagType;
+        public uint KitID;
+        public byte FaceID;
+        public byte SkinID;
+
+        public uint MainWeaponID;
+        public uint PistolWeaponID;
+        public uint GrenadeWeaponID;
+
+        public uint MainWeaponInventoryID;
+        public uint PistolWeaponInventoryID;
+        public uint GrenadeWeaponInventoryID;
+        public uint ArmorInventoryID;
+        public uint HelmetInventoryID;
+        public uint AbilityInventoryID;
+        public uint PassiveAbilityInventoryID;
+
+        public uint HelmetKey;
+        public byte AbilityType;
+        public byte PassiveAbilityType;
+        public string Source = "";
+    }
+
     public static class DBHelper
     {
         public static SQLiteConnection connection = new SQLiteConnection();
@@ -315,13 +341,31 @@ namespace QuazalWV
         //   inventorybags:     id(0)  pid(1)  bagtype(2)
         //   inventorybagslots: id(0)  bagid(1)  inventoryid(2)  slotid(3)  durability(4)
         //   useritems:         id(0)  inventoryid(1)  pid(2)  itemtype(3)  itemid(4) ...
-        // bagtype 4 == the loadout bag. slotid == the in-bag slot index. inventoryid == the equipped item.
+        // bagtype 4/5/6 == Assault/Recon/Specialist loadout bags. slotid == the in-bag slot index.
+        // inventoryid == the equipped item.
+
+        public static uint GetLoadoutBagType(uint classId)
+        {
+            return 4 + classId;
+        }
 
         // inventorybags.id for a persona's bag of the given bagtype, or -1 if none.
         public static int GetBagId(uint pid, uint bagType)
         {
             List<List<string>> r = GetQueryResults("SELECT id FROM inventorybags WHERE pid=" + pid + " AND bagtype=" + bagType);
             return r.Count > 0 ? Convert.ToInt32(r[0][0]) : -1;
+        }
+
+        public static int GetOrCreateBagId(uint pid, uint bagType)
+        {
+            int bagId = GetBagId(pid, bagType);
+            if (bagId >= 0) return bagId;
+            try
+            {
+                new SQLiteCommand("INSERT INTO inventorybags (pid, bagtype) VALUES (" + pid + "," + bagType + ")", connection).ExecuteNonQuery();
+            }
+            catch { }
+            return GetBagId(pid, bagType);
         }
 
         // The inventoryid currently sitting in (bag, slot), or 0 if the slot is empty/absent.
@@ -335,6 +379,20 @@ namespace QuazalWV
         public static void SetSlotInventoryId(int bagId, uint slotId, uint inventoryId)
         {
             try { new SQLiteCommand("UPDATE inventorybagslots SET inventoryid=" + inventoryId + " WHERE bagid=" + bagId + " AND slotid=" + slotId, connection).ExecuteNonQuery(); }
+            catch { }
+        }
+
+        public static void UpsertSlotInventoryId(int bagId, uint slotId, uint inventoryId)
+        {
+            if (inventoryId == 0) return;
+            try
+            {
+                List<List<string>> row = GetQueryResults("SELECT id FROM inventorybagslots WHERE bagid=" + bagId + " AND slotid=" + slotId);
+                if (row.Count > 0)
+                    new SQLiteCommand("UPDATE inventorybagslots SET inventoryid=" + inventoryId + " WHERE bagid=" + bagId + " AND slotid=" + slotId, connection).ExecuteNonQuery();
+                else
+                    new SQLiteCommand("INSERT INTO inventorybagslots (bagid, inventoryid, slotid, durability) VALUES (" + bagId + "," + inventoryId + "," + slotId + ",100)", connection).ExecuteNonQuery();
+            }
             catch { }
         }
 
@@ -359,21 +417,29 @@ namespace QuazalWV
             return r.Count > 0 ? Convert.ToUInt32(r[0][0]) : 0;
         }
 
-        // Apply a loadout kit's weapons to the persona's loadout bag (bagtype 4) for method 17
-        // (EquipPlayerWithLoadoutKit). Verified from the live loadout bag (pid 4660): slot 1 = primary
-        // weapon, slot 2 = secondary (both itemtype 2); slots 7/8/9 hold itemtype-4 items whose kit-field
-        // mapping isn't confirmed yet, so we place ONLY the two weapons. Each write is a safe no-op if the
-        // player doesn't own the kit's weapon or the slot row is absent (SetSlotInventoryId UPDATEs in place).
+        // Apply a loadout kit to the persona's class-specific loadout bag for method 17
+        // (EquipPlayerWithLoadoutKit). IDA ClassInfoRdvPC::ValidatePlayerLoadout confirms slot ids:
+        // 1/2/3 weapons, 7 armor, 8 helmet, 9 ability, 10 passive. The selected kit's class is also
+        // persisted into personas.lastusedcid so the later DS spawn can build matching abstract/concrete
+        // class ids and ClassInfo.
         public static void ApplyLoadoutKit(uint pid, uint kitId)
         {
             GR5_LoadoutKit kit = null;
             foreach (GR5_LoadoutKit k in GetLoadoutKits(pid))
                 if (k.m_LoadoutKitID == kitId) { kit = k; break; }
             if (kit == null) return;
-            int bagId = GetBagId(pid, 4);
+            uint classId = kit.m_ClassID;
+            SetSelectedClass(pid, classId);
+            SetCharacterLoadoutKit(pid, classId, kitId);
+            int bagId = GetOrCreateBagId(pid, GetLoadoutBagType(classId));
             if (bagId < 0) return;
             EquipKitSlot(pid, bagId, 1, kit.m_Weapon1ID);
             EquipKitSlot(pid, bagId, 2, kit.m_Weapon2ID);
+            EquipKitSlot(pid, bagId, 3, kit.m_Weapon3ID);
+            EquipKitSlot(pid, bagId, 7, kit.m_ArmorID);
+            EquipKitSlot(pid, bagId, 8, kit.m_HelmetID);
+            EquipKitSlot(pid, bagId, 9, kit.m_PowerID != 0 ? kit.m_PowerID : GetDefaultAbilityItem(classId));
+            EquipKitSlot(pid, bagId, 10, GetDefaultPassiveAbilityItem(classId));
         }
 
         // Resolve a kit ItemID to the persona's owned inventoryid and drop it into (loadout bag, slot).
@@ -382,16 +448,18 @@ namespace QuazalWV
             if (itemId == 0) return;
             uint invId = GetInventoryIdForItem(pid, itemId);
             if (invId == 0) return;                       // not owned -> leave the slot untouched
-            SetSlotInventoryId(bagId, slotId, invId);     // UPDATE only affects an existing slot row
+            UpsertSlotInventoryId(bagId, slotId, invId);
         }
 
-        // The equipped weapon's mapKey for a loadout slot (bagtype 4): slot 1 = primary, 2 = secondary.
-        // Returns 0 if nothing is equipped / not found. Lets the DS spawn field the player's actual guns.
+        // The equipped weapon's mapKey for a selected-class loadout slot (bagtype 4/5/6):
+        // slot 1 = primary, 2 = secondary. Returns 0 if nothing is equipped / not found.
+        // Lets the DS spawn field the player's actual guns.
         public static uint GetLoadoutWeapon(uint pid, uint slotId)
         {
             try
             {
-                int bagId = GetBagId(pid, 4);
+                uint classId = GetSelectedClassID(pid);
+                int bagId = GetBagId(pid, GetLoadoutBagType(classId));
                 if (bagId < 0) return 0;
                 uint invId = GetSlotInventoryId(bagId, slotId);
                 if (invId == 0) return 0;
@@ -399,6 +467,188 @@ namespace QuazalWV
                 return r.Count > 0 ? Convert.ToUInt32(r[0][0]) : 0;
             }
             catch { return 0; }
+        }
+
+        public static void SetSelectedClass(uint pid, uint classId)
+        {
+            try { new SQLiteCommand("UPDATE personas SET lastusedcid=" + classId + " WHERE pid=" + pid, connection).ExecuteNonQuery(); }
+            catch { }
+        }
+
+        public static void SetCharacterLoadoutKit(uint pid, uint classId, uint kitId)
+        {
+            try { new SQLiteCommand("UPDATE characters SET kit=" + kitId + " WHERE pid=" + pid + " AND class=" + classId, connection).ExecuteNonQuery(); }
+            catch { }
+        }
+
+        public static uint GetSelectedClassID(uint pid)
+        {
+            try
+            {
+                List<List<string>> r = GetQueryResults("SELECT lastusedcid FROM personas WHERE pid=" + pid);
+                uint classId = r.Count > 0 ? SafeU32(r[0][0]) : 0;
+                if (classId > 2) classId = 0;
+                return classId;
+            }
+            catch { return 0; }
+        }
+
+        public static uint GetDefaultAbilityItem(uint classId)
+        {
+            List<List<string>> r = GetQueryResults("SELECT iid FROM abilities WHERE classID=" + classId + " ORDER BY iid LIMIT 1");
+            return r.Count > 0 ? SafeU32(r[0][0]) : 0;
+        }
+
+        public static uint GetDefaultPassiveAbilityItem(uint classId)
+        {
+            List<List<string>> r = GetQueryResults("SELECT iid FROM passiveabilities WHERE classID=" + classId + " ORDER BY iid LIMIT 1");
+            return r.Count > 0 ? SafeU32(r[0][0]) : 0;
+        }
+
+        public static uint GetTemplateItemType(uint itemId)
+        {
+            List<List<string>> r = GetQueryResults("SELECT type FROM templateitems WHERE iid=" + itemId);
+            return r.Count > 0 ? SafeU32(r[0][0]) : 0;
+        }
+
+        public static uint GetItemIdForInventory(uint pid, uint inventoryId)
+        {
+            List<List<string>> r = GetQueryResults("SELECT itemid FROM useritems WHERE pid=" + pid + " AND inventoryid=" + inventoryId);
+            return r.Count > 0 ? SafeU32(r[0][0]) : 0;
+        }
+
+        public static uint GetInventoryIdForLoadoutSlot(uint pid, uint classId, uint slotId)
+        {
+            int bagId = GetBagId(pid, GetLoadoutBagType(classId));
+            return bagId < 0 ? 0 : GetSlotInventoryId(bagId, slotId);
+        }
+
+        public static uint GetAbilityType(uint abilityItemId)
+        {
+            List<List<string>> r = GetQueryResults("SELECT abilitytype FROM abilities WHERE iid=" + abilityItemId);
+            return r.Count > 0 ? SafeU32(r[0][0]) : 0;
+        }
+
+        public static uint GetPassiveAbilityType(uint passiveItemId)
+        {
+            List<List<string>> r = GetQueryResults("SELECT type FROM passiveabilities WHERE iid=" + passiveItemId);
+            return r.Count > 0 ? SafeU32(r[0][0]) : 0;
+        }
+
+        public static uint GetHelmetAssetKey(uint helmetItemId)
+        {
+            List<List<string>> r = GetQueryResults("SELECT assetkey FROM armoritems WHERE iid=" + helmetItemId);
+            return r.Count > 0 ? SafeU32(r[0][0]) : 0;
+        }
+
+        private static bool ApplyItemIdIfType(uint pid, SpawnLoadoutInfo info, uint slotId, uint expectedType)
+        {
+            uint invId = GetInventoryIdForLoadoutSlot(pid, info.ClassID, slotId);
+            if (invId == 0) return false;
+            uint itemId = GetItemIdForInventory(pid, invId);
+            if (itemId == 0 || GetTemplateItemType(itemId) != expectedType) return false;
+            switch (slotId)
+            {
+                case 1: info.MainWeaponInventoryID = invId; info.MainWeaponID = itemId; break;
+                case 2: info.PistolWeaponInventoryID = invId; info.PistolWeaponID = itemId; break;
+                case 3: info.GrenadeWeaponInventoryID = invId; info.GrenadeWeaponID = itemId; break;
+                case 7: info.ArmorInventoryID = invId; break;
+                case 8: info.HelmetInventoryID = invId; info.HelmetKey = GetHelmetAssetKey(itemId); break;
+                case 9: info.AbilityInventoryID = invId; info.AbilityType = (byte)GetAbilityType(itemId); break;
+                case 10: info.PassiveAbilityInventoryID = invId; info.PassiveAbilityType = (byte)GetPassiveAbilityType(itemId); break;
+            }
+            return true;
+        }
+
+        public static SpawnLoadoutInfo GetSpawnLoadout(uint pid)
+        {
+            SpawnLoadoutInfo info = new SpawnLoadoutInfo();
+            info.ClassID = (byte)GetSelectedClassID(pid);
+            info.BagType = GetLoadoutBagType(info.ClassID);
+            info.FaceID = 1;
+            info.SkinID = 1;
+            info.MainWeaponID = 170;
+            info.PistolWeaponID = 339;
+            info.HelmetKey = 0xF8700A85;
+            info.Source = "fallback";
+            bool abilityResolved = false;
+            bool passiveResolved = false;
+
+            try
+            {
+                List<List<string>> chars = GetQueryResults("SELECT face, skin, kit FROM characters WHERE pid=" + pid + " AND class=" + info.ClassID);
+                if (chars.Count > 0)
+                {
+                    info.FaceID = SafeU8(chars[0][0]);
+                    info.SkinID = SafeU8(chars[0][1]);
+                    info.KitID = SafeU32(chars[0][2]);
+                }
+
+                uint defaultAbilityItem = GetDefaultAbilityItem(info.ClassID);
+                if (defaultAbilityItem != 0)
+                {
+                    info.AbilityInventoryID = GetInventoryIdForItem(pid, defaultAbilityItem);
+                    info.AbilityType = (byte)GetAbilityType(defaultAbilityItem);
+                    abilityResolved = true;
+                }
+                uint defaultPassiveItem = GetDefaultPassiveAbilityItem(info.ClassID);
+                if (defaultPassiveItem != 0)
+                {
+                    info.PassiveAbilityInventoryID = GetInventoryIdForItem(pid, defaultPassiveItem);
+                    info.PassiveAbilityType = (byte)GetPassiveAbilityType(defaultPassiveItem);
+                    passiveResolved = true;
+                }
+
+                GR5_LoadoutKit kit = null;
+                foreach (GR5_LoadoutKit k in GetLoadoutKits(pid))
+                    if (k.m_ClassID == info.ClassID && (k.m_LoadoutKitID == info.KitID || kit == null))
+                        kit = k;
+                if (kit != null)
+                {
+                    info.KitID = kit.m_LoadoutKitID;
+                    if (kit.m_Weapon1ID != 0) info.MainWeaponID = kit.m_Weapon1ID;
+                    if (kit.m_Weapon2ID != 0) info.PistolWeaponID = kit.m_Weapon2ID;
+                    if (kit.m_Weapon3ID != 0) info.GrenadeWeaponID = kit.m_Weapon3ID;
+                    if (kit.m_ArmorID != 0) info.ArmorInventoryID = GetInventoryIdForItem(pid, kit.m_ArmorID);
+                    if (kit.m_HelmetID != 0)
+                    {
+                        info.HelmetInventoryID = GetInventoryIdForItem(pid, kit.m_HelmetID);
+                        info.HelmetKey = GetHelmetAssetKey(kit.m_HelmetID);
+                    }
+                    uint abilityItem = kit.m_PowerID != 0 ? kit.m_PowerID : defaultAbilityItem;
+                    if (abilityItem != 0)
+                    {
+                        info.AbilityInventoryID = GetInventoryIdForItem(pid, abilityItem);
+                        info.AbilityType = (byte)GetAbilityType(abilityItem);
+                        abilityResolved = true;
+                    }
+                    uint passiveItem = defaultPassiveItem;
+                    if (passiveItem != 0)
+                    {
+                        info.PassiveAbilityInventoryID = GetInventoryIdForItem(pid, passiveItem);
+                        info.PassiveAbilityType = (byte)GetPassiveAbilityType(passiveItem);
+                        passiveResolved = true;
+                    }
+                    info.Source = "kit";
+                }
+
+                ApplyItemIdIfType(pid, info, 1, 2);
+                ApplyItemIdIfType(pid, info, 2, 2);
+                ApplyItemIdIfType(pid, info, 3, 2);
+                ApplyItemIdIfType(pid, info, 7, 10);
+                ApplyItemIdIfType(pid, info, 8, 8);
+                if (ApplyItemIdIfType(pid, info, 9, 11)) abilityResolved = true;
+                if (ApplyItemIdIfType(pid, info, 10, 13)) passiveResolved = true;
+                info.Source += "+bag" + info.BagType;
+
+                if (info.MainWeaponID == 0) info.MainWeaponID = 170;
+                if (info.PistolWeaponID == 0) info.PistolWeaponID = 339;
+                if (!abilityResolved) info.AbilityType = 6;
+                if (!passiveResolved) info.PassiveAbilityType = 3;
+                if (info.HelmetKey == 0) info.HelmetKey = 0xF8700A85;
+            }
+            catch { }
+            return info;
         }
 
         // Component map-key list for a weapon, by its weapons.mapKey (== componentListID).

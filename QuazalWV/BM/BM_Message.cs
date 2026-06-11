@@ -12,7 +12,6 @@ namespace QuazalWV
         public byte msgType = 0xA;
         public ushort msgID;
         public List<BM_Param> paramList = new List<BM_Param>();
-        public static int g_cap99 = 0;   // [walk-fix TEMP] 0x99 capture counter (cap to bound the brief disk I/O)
         public static byte[] Make(BM_Message msg)
         {
             MemoryStream m = new MemoryStream();
@@ -64,23 +63,10 @@ namespace QuazalWV
                     ushort size = Helper.ReadU16LE(s);
                     byte[] payload = new byte[size];
                     s.Read(payload, 0, size);
-                    // [0x99 CAPTURE -- walk-fix TEMP] recover the client's SendReplicaData wire envelope.
-                    // File-based (NO UI writes), RAW payload (pre-retarget), gated on clientReadyHandled so it
-                    // only runs post-spawn (can't lag the spawn handshake like the removed UI capture did), and
-                    // capped at 400 lines. Delete this block + the g_cap99 field after the envelope is decoded.
-                    if (client.clientReadyHandled && g_cap99 < 400)
-                    {
-                        g_cap99++;
-                        try {
-                            System.IO.File.AppendAllText(@"D:\Phoenix\GRO\GRO_0x99_capture.txt",
-                                "#" + g_cap99 + " len=" + size + "  " + BitConverter.ToString(payload).Replace('-', ' ') + "\r\n");
-                        } catch { }
-                    }
-                    // (Removed the cycle-1 [0x99] capture logging: those 80 BitConverter hex dumps + UI writes
-                    //  flooded the DS UI thread early, so the DS fell seconds behind and lagged the spawn
-                    //  handshake. The replica wire format was obtained from the binary instead.)
-                    payload[0x11] = 0;
-                    payload[0x12] = 0x27;
+                    // Echo the replica payload exactly as the client sent it. Older diagnostics rewrote
+                    // bytes 0x11/0x12 to object 0x27 after capture, but the decoded 0x99 stream targets
+                    // object 2. Retargeting here disconnects the position/orientation stream the camera
+                    // and stance pipeline consume.
                     msgs.Add(DO_RMCRequestMessage.Create(client.callCounterDO_RMC++,
                         0x1006,
                         new DupObj(DupObjClass.Station, 1),
@@ -92,12 +78,24 @@ namespace QuazalWV
                 case 0xA3:
                     if (!client.playerCreateStuffSent1)
                     {
+                        SpawnLoadoutInfo _loadout = DBHelper.GetSpawnLoadout(client.PID);
+                        OCP_AbstractPlayerEntity _abstract = new OCP_AbstractPlayerEntity(1);
+                        _abstract.pid = client.PID;
+                        _abstract.classID = _loadout.ClassID;
+                        _abstract.abilityInventoryId = _loadout.AbilityInventoryID;
+                        _abstract.passiveAbilityInventoryId = _loadout.PassiveAbilityInventoryID;
+                        _abstract.desiredWeaponMainInventoryId = _loadout.MainWeaponInventoryID;
+                        _abstract.desiredWeaponPistolInventoryId = _loadout.PistolWeaponInventoryID;
+                        _abstract.desiredWeaponGrenadeInventoryId = _loadout.GrenadeWeaponInventoryID;
+                        _abstract.helmetInventoryId = _loadout.HelmetInventoryID;
+                        _abstract.armorInventoryId = _loadout.ArmorInventoryID;
+                        Log.WriteLine(1, "[DS] abstract spawn loadout: pid=" + client.PID + " class=" + _loadout.ClassID + " bag=" + _loadout.BagType + " source=" + _loadout.Source);
                         msgs.Add(DO_RMCRequestMessage.Create(client.callCounterDO_RMC++,
                             0x1006,
                             new DupObj(DupObjClass.Station, 1),
                             new DupObj(DupObjClass.NET_MessageBroker, 5),
                             (ushort)DO_RMCRequestMessage.DOC_METHOD.ProcessMessage,
-                            Make(new MSG_ID_Net_Obj_Create(0x2C, 0x15, new OCP_AbstractPlayerEntity(1).MakePayload()))
+                            Make(new MSG_ID_Net_Obj_Create(0x2C, 0x15, _abstract.MakePayload()))
                             ));
                         msgs.Add(DO_RMCRequestMessage.Create(client.callCounterDO_RMC++,
                             0x1006,

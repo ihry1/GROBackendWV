@@ -15,13 +15,22 @@ namespace QuazalWV
     // Block framing: [u8 size][u8 size2][size mask bytes], mask bit i==0 => field present.
     //
     // The pawn's ClassInfo is keyed by (pid, m_Class); m_Class here MUST match
-    // OCP_PlayerEntity.classID (both 0). m_SpawnBlockingReasons MUST be 0 (non-zero blocks deploy).
+    // OCP_PlayerEntity.classID for the selected class. m_SpawnBlockingReasons MUST be 0
+    // (non-zero blocks deploy).
     public class OCP_AbstractPlayerEntity
     {
         public uint handle;
         public byte teamID = 0x1;
+        public byte classID = 0;
         public uint pid = 0x1234;
         public uint dsGameMode = 0;
+        public uint abilityInventoryId = 0;
+        public uint passiveAbilityInventoryId = 0;
+        public uint desiredWeaponMainInventoryId = 0;
+        public uint desiredWeaponPistolInventoryId = 0;
+        public uint desiredWeaponGrenadeInventoryId = 0;
+        public uint helmetInventoryId = 0;
+        public uint armorInventoryId = 0;
 
         public OCP_AbstractPlayerEntity(uint h)
         {
@@ -42,16 +51,16 @@ namespace QuazalWV
             m.Write(new byte[2], 0, 2);
 
             Helper.WriteU32LE(m, 0);     //  1 m_DeathCount                u32 BE
-            Helper.WriteU32LE(m, 0);     //  2 m_AbilityInventoryId        u32 BE
-            Helper.WriteU32LE(m, 0);     //  3 m_PassiveAbilityInventoryId u32 BE
-            Helper.WriteU32LE(m, 0);     //  4 m_DesiredWeaponIds[Main]    u32 BE (3xU32)
-            Helper.WriteU32LE(m, 0);     //    m_DesiredWeaponIds[Pistol]  u32 BE
-            Helper.WriteU32LE(m, 0);     //    m_DesiredWeaponIds[Grenade] u32 BE
+            Helper.WriteU32LE(m, abilityInventoryId);     //  2 m_AbilityInventoryId        u32 BE
+            Helper.WriteU32LE(m, passiveAbilityInventoryId); // 3 m_PassiveAbilityInventoryId u32 BE
+            Helper.WriteU32LE(m, desiredWeaponMainInventoryId);    //  4 m_DesiredWeaponIds[Main]    u32 BE (3xU32)
+            Helper.WriteU32LE(m, desiredWeaponPistolInventoryId);  //    m_DesiredWeaponIds[Pistol]  u32 BE
+            Helper.WriteU32LE(m, desiredWeaponGrenadeInventoryId); //    m_DesiredWeaponIds[Grenade] u32 BE
             Helper.WriteU32LE(m, 0);     //  5 m_AchievementPoints         u32 BE
-            Helper.WriteU32LE(m, 0);     //  6 m_HelmetInventoryId         u32 BE
-            Helper.WriteU32LE(m, 0);     //  7 m_ArmorTierInventoryId      u32 BE
+            Helper.WriteU32LE(m, helmetInventoryId);      //  6 m_HelmetInventoryId         u32 BE
+            Helper.WriteU32LE(m, armorInventoryId);       //  7 m_ArmorTierInventoryId      u32 BE
             Helper.WriteU16LE(m, 0);     //  8 m_SpawnBlockingReasons      u16 BE =0 (deployable)
-            Helper.WriteU8(m, 0);        //  9 m_Class                     u8  =0
+            Helper.WriteU8(m, classID);  //  9 m_Class                     u8
             Helper.WriteU16LE(m, 0);     // 10 m_ClassLevel                u16 BE
             Helper.WriteU32LE(m, 0);     // 11 m_PortraitId                u32 BE
             Helper.WriteU32(m, 0);       // 12 m_PersonaName length        u32 LE (=0 -> empty)

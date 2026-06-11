@@ -45,6 +45,11 @@ namespace QuazalWV
             }
         }
 
+        public ClassInfo_Armor(uint armorInventoryId) : this()
+        {
+            if (armorInventoryId != 0) armorItemId = armorInventoryId;
+        }
+
         public byte[] MakePayload()
         {
             MemoryStream m = new MemoryStream();

@@ -1313,6 +1313,7 @@ char __fastcall RC_diag(void* THIS, void* EDX, int index)
 	DWORD mgr   = *(DWORD*)((char*)THIS + 0xF6C);
 	DWORD descB = mgr ? *(DWORD*)(mgr + 0x5D4) : 0;     // dword5CC BEFORE
 	DWORD mood  = *(DWORD*)((char*)THIS + 0x824);       // m_Mood.currValue
+	DWORD mask  = *(DWORD*)((char*)THIS + 0xD90);       // ★ADS-LEVER: allowed-mood mask. Order_ChangeMood(n) is a NO-OP unless (1<<n)&mask. aiming = bit18 (0x40000)
 	DWORD prev  = *(DWORD*)((char*)THIS + 0xDA8);       // prev-mood
 	DWORD load  = *(DWORD*)((char*)THIS + 0x1400);      // visual load-state (3 = banks loaded)
 
@@ -1360,6 +1361,7 @@ __declspec(align(16)) static unsigned char g_mo_fxbuf[512];
 static DWORD g_mo_seenCaller[32] = { 0 };   // de-dup: distinct caller addresses already logged
 static int   g_mo_seenCount = 0;
 static int   g_mo_logged = 0;               // total lines emitted (cap to bound disk I/O)
+static int   g_mo_seen18 = 0;               // one-shot: capture the first Order_ChangeMood(18) = the ADS aiming-mood attempt
 
 char __fastcall MoodOrder_diag(void* THIS, void* EDX, int newMood)
 {
@@ -1375,6 +1377,7 @@ char __fastcall MoodOrder_diag(void* THIS, void* EDX, int newMood)
 	DWORD mgr   = *(DWORD*)((char*)THIS + 0xF6C);
 	DWORD descB = mgr ? *(DWORD*)(mgr + 0x5D4) : 0;     // dword5CC BEFORE
 	DWORD mood  = *(DWORD*)((char*)THIS + 0x824);       // m_Mood.currValue
+	DWORD mask  = *(DWORD*)((char*)THIS + 0xD90);       // ★ADS-LEVER: allowed-mood mask. Order_ChangeMood(n) is a NO-OP unless (1<<n)&mask. aiming = bit18 (0x40000)
 	DWORD prev  = *(DWORD*)((char*)THIS + 0xDA8);       // prev-mood
 	DWORD load  = *(DWORD*)((char*)THIS + 0x1400);      // visual load-state (3 = banks loaded)
 	DWORD sflag = *(DWORD*)((char*)THIS + 0x30);        // serializationFlags (&1=master/local, &2=server-authored) -- gates InitEntity's Order_ChangeMood(3)
@@ -1392,11 +1395,13 @@ char __fastcall MoodOrder_diag(void* THIS, void* EDX, int newMood)
 	// Log (a) the first time each distinct caller is seen (to enumerate the engine trigger sites), and
 	// (b) ALWAYS the resolve transition dword5CC 0->nonzero (the A-pose-fixed moment + its timing).
 	bool resolve   = (descB == 0 && descA != 0);
+	bool aim18     = (newMood == 18 && !g_mo_seen18);   // ADS aiming-mood attempt (bit18=0x40000); log once regardless of caller de-dup
+	if (aim18) g_mo_seen18 = 1;
 	bool newCaller = true;
 	for (int i = 0; i < g_mo_seenCount; i++) if (g_mo_seenCaller[i] == c) { newCaller = false; break; }
 	if (newCaller && g_mo_seenCount < 32) g_mo_seenCaller[g_mo_seenCount++] = c;
 
-	if ((newCaller || resolve) && g_mo_logged < 120)
+	if ((newCaller || resolve || aim18) && g_mo_logged < 120)
 	{
 		g_mo_logged++;
 		_fxsave(g_mo_fxbuf);
@@ -1420,12 +1425,121 @@ char __fastcall MoodOrder_diag(void* THIS, void* EDX, int newMood)
 			}
 			modoff = c - (DWORD)hmod;
 		}
-		sprintf(buffer, "[MO] %s this=0x%08X newMood=%d caller=0x%08X (%s+0x%X) sflag=0x%X owner=0x%08X myNetId=0x%08X intOwn=%d%s mood=0x%X load=%d desc:0x%08X->0x%08X%s\n\0",
-			isLocal ? "LOCAL" : "ent  ", (DWORD)THIS, newMood, c, modname, modoff, sflag, owner, myNet, intOwn,
-			(owner == myNet) ? " MATCH" : " MISMATCH", mood, load, descB, descA,
+		sprintf(buffer, "[MO] %s this=0x%08X newMood=%d caller=0x%08X (%s+0x%X) sflag=0x%X mood=0x%X mask=0x%X aimBitInMask=%d load=%d desc:0x%08X->0x%08X%s\n\0",
+			isLocal ? "LOCAL" : "ent  ", (DWORD)THIS, newMood, c, modname, modoff, sflag, mood, mask, ((mask & 0x40000) ? 1 : 0), load, descB, descA,
 			resolve ? "  *** dword5CC SET (A-POSE RESOLVE) ***" : "");
 		Log(buffer);
 		_fxrstor(g_mo_fxbuf);
+	}
+	return result;
+}
+
+// [CAM] ADS camera-mode diag (installed with "_moodorder_"): hook AI_Camera_SelectStanceCameraMode @0x101B6F20.
+// Logs ONLY when aiming (mood&0x40000), capped. byte969 (pawn+0x144D) gates aim mode 8 (correct ADS) vs the
+// fall-through aim-down mode 3 (wrong). Splits: byte969=0 -> mode 3 (deploy/input-focus flag never latched) vs
+// byte969=1 & selectedMode!=8 -> the wrongness is downstream (camera-settings table / iron remap).
+void* (__cdecl* org_ADSmode_diag)(int, void*) = 0;
+static int g_adsmode_n = 0;
+void* __cdecl ADSmode_diag(int a1, void* a2)
+{
+	// byte969-force test REVERTED 2026-06-08: forcing mode 8 did NOT change standing ADS (and broke prone) ->
+	// the camera MODE index is not the lever; the OTS->iron-sight BLEND is. Back to read-only logging.
+	void* r = org_ADSmode_diag(a1, a2);               // run original (writes the mode to *a1)
+	DWORD mood = *(DWORD*)((char*)a2 + 0x824);
+	if ((mood & 0x40000) && g_adsmode_n < 30)         // only while aiming
+	{
+		g_adsmode_n++;
+		_fxsave(g_mo_fxbuf);
+		DWORD b969 = *(BYTE*)((char*)a2 + 0x144D);     // byte969 (the aim-mode gate)
+		int   mode = a1 ? *(int*)a1 : -1;              // the mode SelectStanceCameraMode just wrote
+		DWORD d480 = *(DWORD*)((char*)a2 + 0x480);     // OTS/iron state (2=iron)
+		sprintf(buffer, "[CAM] AIM byte969=%u selectedMode=%d mood=0x%X d480=%u\n\0", b969, mode, mood, d480);
+		Log(buffer);
+		_fxrstor(g_mo_fxbuf);
+	}
+	return r;
+}
+
+// [IRONF] iron-sight BLEND factor diag (installed with "_moodorder_"): hook AI_CameraBase::GetIronSightFactor
+// @0x101B0760. Returns *(this[11]+212): 1.0(0x3F800000)=full iron-sight position, 0.0=full over-the-shoulder.
+// If this stays 0 while aiming, the camera POSITION never blends to the iron eye-offset -> "sights view but
+// camera in the wrong (over-shoulder) spot" -- exactly the reported symptom. Logs the raw factor on change, capped.
+double (__fastcall* org_IronFactor_diag)(void*, void*) = 0;
+static int   g_ironf_n = 0;
+static DWORD g_ironf_last = 0xFFFFFFFF;
+double __fastcall IronFactor_diag(void* THIS, void* EDX)
+{
+	double r = org_IronFactor_diag(THIS, EDX);
+	DWORD ctx = ((DWORD*)THIS)[11];
+	DWORD f = ctx ? *(DWORD*)(ctx + 212) : 0xDEADBEEF;
+	if (f != g_ironf_last && g_ironf_n < 40)          // log on change only (bounded)
+	{
+		g_ironf_last = f;
+		g_ironf_n++;
+		_fxsave(g_mo_fxbuf);
+		sprintf(buffer, "[IRONF] ironSightFactor=0x%08X  (0x3F800000=1.0 iron, 0=over-shoulder)\n\0", f);
+		Log(buffer);
+		_fxrstor(g_mo_fxbuf);
+	}
+	return r;
+}
+
+// [ACS] CONSUMED stance-camera offset diag (installed with "_moodorder_"): hook AI_Camera_ApplyStanceCameraSettings
+// @0x101B7900 (__fastcall, THIS=camera obj). The original indexes the CLIENT CameraSettings Zen table by the FINAL
+// mode (THIS->m_ShootPosition.currValue.x @+0x204, AFTER the IronMode remap) and loads the over-shoulder/eye offset
+// into THIS->vec220 @+0x220 (x/y/z). Hooking AFTER the original captures the consumed mode + the LOADED offset ->
+// splits "wrong mode selected" (mode != the expected iron mode) vs "Zen table not loaded" (mode correct but offset
+// 0/garbage). On-change only (the ADS transition changes the mode). FP-safe: raw integer reads; the %f formatting
+// runs INSIDE the fxsave/fxrstor bracket which saves+restores the full FPU/SSE state.
+int (__fastcall* org_ApplyStanceCam_diag)(void*, void*) = 0;
+static int   g_acs_init = 0;
+static int   g_acs_pMode = -999;
+static DWORD g_acs_pX = 0, g_acs_pY = 0, g_acs_pZ = 0;
+static unsigned char g_acs_entDumped[40] = {0};   // [ACSENT] one-time-per-mode raw table-entry dump guard
+int __fastcall ApplyStanceCam_diag(void* THIS, void* EDX)
+{
+	int result = org_ApplyStanceCam_diag(THIS, EDX);   // run original first (loads vec220 from the Zen table)
+	if (THIS)
+	{
+		char* p = (char*)THIS;
+		int   mode = *(int*)(p + 0x204);                // m_ShootPosition.currValue.x = consumed mode index
+		DWORD x = *(DWORD*)(p + 0x220);                 // vec220.x over-shoulder offset (raw bits)
+		DWORD y = *(DWORD*)(p + 0x224);                 // vec220.y
+		DWORD z = *(DWORD*)(p + 0x228);                 // vec220.z
+		if (!g_acs_init || mode != g_acs_pMode || x != g_acs_pX || y != g_acs_pY || z != g_acs_pZ)
+		{
+			g_acs_init = 1; g_acs_pMode = mode; g_acs_pX = x; g_acs_pY = y; g_acs_pZ = z;
+			_fxsave(g_mo_fxbuf);
+			sprintf(buffer, "[ACS] consumedMode=%d overShoulder=(%.3f, %.3f, %.3f) bits=(%08X, %08X, %08X)\n\0",
+				mode, *(float*)&x, *(float*)&y, *(float*)&z, x, y, z);
+			Log(buffer);
+			_fxrstor(g_mo_fxbuf);
+		}
+		// [ACSENT] one-time dump of the RAW CameraSettings Zen table entry for this mode.
+		// entry = *(dword_1073DA7C + 88) + 416*mode  (dword_1073DA7C = the zen::CameraSettings singleton, sub_101FA620).
+		// Full 416-byte (104-float) entry so mode 3 (hip-stand) vs mode 21 (iron-stand) can be diffed offline:
+		// identical => the iron eye is NOT differentiated in the data; different => table fine, wrongness is downstream.
+		if (mode >= 0 && mode < 40 && !g_acs_entDumped[mode])
+		{
+			DWORD sing = *(DWORD*)(baseAddressAI + 0x73DA7C);   // zen::CameraSettings singleton
+			if (sing >= 0x00010000 && sing < 0x7FFF0000 && (sing & 3) == 0)
+			{
+				DWORD tbl = *(DWORD*)(sing + 88);               // table base
+				if (tbl >= 0x00010000 && tbl < 0x7FFF0000 && (tbl & 3) == 0)
+				{
+					g_acs_entDumped[mode] = 1;
+					float* e = (float*)(tbl + 416 * mode);
+					_fxsave(g_mo_fxbuf);
+					for (int i = 0; i < 104; i += 8)
+					{
+						sprintf(buffer, "[ACSENT] m%d e%03d: %.3f %.3f %.3f %.3f %.3f %.3f %.3f %.3f\n",
+							mode, i, e[i], e[i+1], e[i+2], e[i+3], e[i+4], e[i+5], e[i+6], e[i+7]);
+						Log(buffer);
+					}
+					_fxrstor(g_mo_fxbuf);
+				}
+			}
+		}
 	}
 	return result;
 }

@@ -35,6 +35,18 @@ namespace QuazalWV
                                     Helper.ReadU32(rm);   // m_FromDurability (unused)
                     uint toSlot   = Helper.ReadU32(rm);
                     uint toBag    = Helper.ReadU32(rm);
+                    // ★CLASS-TO-SPAWN FIX (2026-06-09): the loadout bag being edited (4=Assault/5=Recon/6=Specialist)
+                    // IS the active class. doc-16/17 wired the class-persist to InventoryService method 17
+                    // (EquipPlayerWithLoadoutKit), but the live client NEVER sends 17 -- it edits loadouts via THIS
+                    // method 8 (EquipLoadout) (confirmed: backend log shows method 8 firing repeatedly, 17 never;
+                    // personas.lastusedcid stayed 0 so GetSpawnLoadout always resolved Assault). Persist lastusedcid
+                    // from the loadout bagtype so the spawn resolves the SELECTED class.
+                    uint _loadoutBag = (toBag >= 4 && toBag <= 6) ? toBag : ((fromBag >= 4 && fromBag <= 6) ? fromBag : 0);
+                    if (_loadoutBag != 0)
+                    {
+                        DBHelper.SetSelectedClass(client.PID, _loadoutBag - 4);
+                        Log.WriteLine(1, "[InventoryService] EquipLoadout -> persist active class=" + (_loadoutBag - 4) + " (loadoutBag=" + _loadoutBag + ") pid=" + client.PID);
+                    }
                     int fromBagId = DBHelper.GetBagId(client.PID, fromBag);
                     int toBagId   = DBHelper.GetBagId(client.PID, toBag);
                     if (fromBagId < 0 || toBagId < 0) continue;

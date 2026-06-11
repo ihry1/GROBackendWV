@@ -49,7 +49,24 @@ namespace QuazalWV
                     RMC.SendResponseWithACK(client.udp, p, rmc, client, reply);
                     break;
                 case 9:
-                //SetCurrentCharacter
+                    {
+                        // ★CLASS-TO-SPAWN SELECT SIGNAL (2026-06-09): SetCurrentCharacter IS the lobby
+                        // class/character pick (RDVDLL GR5_ChatService method 9, byte _characterID). With one
+                        // character per class, CharId == classId (0=Assault/1=Recon/2=Specialist). Persist it to
+                        // personas.lastusedcid so the DS spawn (GetSpawnLoadout) builds the matching class -- this
+                        // fires on a pure SELECT (no loadout edit). doc-16/17 wrongly hooked InventoryService
+                        // method 17 (EquipPlayerWithLoadoutKit), which the client never sends. The method-8
+                        // EquipLoadout persist additionally covers the customize-into-a-loadout-bag path.
+                        var scc = rmc.request as RMCPacketRequestChatService_SetCurrentCharacter;
+                        if (scc != null && scc.CharId <= 2)
+                        {
+                            DBHelper.SetSelectedClass(client.PID, scc.CharId);
+                            Log.WriteLine(1, "[ChatService] SetCurrentCharacter -> persist active class=" + scc.CharId + " pid=" + client.PID);
+                        }
+                        reply = new RMCPResponseEmpty();
+                        RMC.SendResponseWithACK(client.udp, p, rmc, client, reply);
+                    }
+                    break;
                 case 10:
                 //SetStatus
                     reply = new RMCPResponseEmpty();

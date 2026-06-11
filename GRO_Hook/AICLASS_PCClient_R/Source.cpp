@@ -360,6 +360,12 @@ void DetourMain()
 	{
 		org_MoodOrder_diag = (char(__fastcall*)(void*, void*, int)) DetourFunction((PBYTE)(baseAddressAI + 0x7A9E0), (PBYTE)MoodOrder_diag);
 		Log("Hooked AI_EntityHuman::Order_ChangeMood (mood-order diag)\n");
+		org_ADSmode_diag = (void*(__cdecl*)(int,void*)) DetourFunction((PBYTE)(baseAddressAI + 0x1B6F20), (PBYTE)ADSmode_diag);
+		Log("Hooked AI_Camera_SelectStanceCameraMode ([CAM] ADS mode diag)\n");
+		org_IronFactor_diag = (double(__fastcall*)(void*,void*)) DetourFunction((PBYTE)(baseAddressAI + 0x1B0760), (PBYTE)IronFactor_diag);
+		Log("Hooked AI_CameraBase::GetIronSightFactor ([IRONF] iron-blend diag)\n");
+		org_ApplyStanceCam_diag = (int(__fastcall*)(void*,void*)) DetourFunction((PBYTE)(baseAddressAI + 0x1B7900), (PBYTE)ApplyStanceCam_diag);
+		Log("Hooked AI_Camera_ApplyStanceCameraSettings ([ACS] consumed-mode + over-shoulder offset diag)\n");
 	}
 	//ReplaceVelocity();
 	//ZEN_Init(baseAddressAI);

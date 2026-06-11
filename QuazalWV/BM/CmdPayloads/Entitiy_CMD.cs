@@ -112,16 +112,25 @@ namespace QuazalWV
                             Global.spawnX = _sx; Global.spawnY = _sy; Global.spawnZ = _sz;
                             Log.WriteLine(1, "[DS] Spawning player at (" + _sx + ", " + _sy + ", " + _sz + ") from Yeti.big");
                         }
-                        // Spawn the player with their ACTUAL loadout weapons. The DS reads the backend DB
-                        // read-only: loadout bag (bagtype 4) slot 1 = primary, slot 2 = secondary. Falls back
-                        // to the M27/P250 defaults when the lookup returns 0 (wrong/absent pid, empty loadout).
+                        // Spawn the player with the same class/loadout chosen in the lobby. The DS reads the
+                        // backend DB read-only, resolving the selected class's bag (4/5/6) plus kit defaults.
                         OCP_PlayerEntity _pe = new OCP_PlayerEntity(2);
-                        uint _primary = DBHelper.GetLoadoutWeapon(client.PID, 1);
-                        uint _secondary = DBHelper.GetLoadoutWeapon(client.PID, 2);
-                        Log.WriteLine(1, "[DS] spawn loadout: pid=" + client.PID + " primary=" + _primary + " secondary=" + _secondary);
-                        if (_primary != 0) _pe.mainWeaponID = _primary;
-                        if (_secondary != 0) _pe.pistolWeaponID = _secondary;
+                        SpawnLoadoutInfo _loadout = DBHelper.GetSpawnLoadout(client.PID);
+                        _pe.classID = _loadout.ClassID;
+                        _pe.mainWeaponID = _loadout.MainWeaponID;
+                        _pe.pistolWeaponID = _loadout.PistolWeaponID;
+                        _pe.armorInventoryID = _loadout.ArmorInventoryID;
+                        _pe.helmetKey = _loadout.HelmetKey;
+                        _pe.abilityType = _loadout.AbilityType;
+                        _pe.passiveAbilityType = _loadout.PassiveAbilityType;
+                        _pe.faceID = _loadout.FaceID;
+                        _pe.skinID = _loadout.SkinID;
                         _pe.pid = client.PID;   // build the player's PERSISTED custom weapon parts (StoreService 22/23) in-match; 0-safe -> defaults
+                        Log.WriteLine(1, "[DS] concrete spawn loadout: pid=" + client.PID + " class=" + _loadout.ClassID + " bag=" + _loadout.BagType +
+                            " primary=" + _loadout.MainWeaponID + " pistol=" + _loadout.PistolWeaponID +
+                            " armorInv=" + _loadout.ArmorInventoryID + " helmetKey=0x" + _loadout.HelmetKey.ToString("X8") +
+                            " abilityType=" + _loadout.AbilityType + " passiveType=" + _loadout.PassiveAbilityType +
+                            " body=" + _loadout.FaceID + "/" + _loadout.SkinID + " source=" + _loadout.Source);
                         msgs.Add(DO_RMCRequestMessage.Create(client.callCounterDO_RMC++,
                             0x1006,
                             new DupObj(DupObjClass.Station, 1),

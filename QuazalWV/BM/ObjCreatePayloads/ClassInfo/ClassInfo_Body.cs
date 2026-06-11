@@ -83,6 +83,12 @@ namespace QuazalWV
             }
         }
 
+        public ClassInfo_Body(byte faceId, byte skinId) : this()
+        {
+            this.faceId = faceId == 0 ? 1u : faceId;
+            this.skinId = skinId == 0 ? (byte)1 : skinId;
+        }
+
         public byte[] MakePayload()
         {
             MemoryStream m = new MemoryStream();

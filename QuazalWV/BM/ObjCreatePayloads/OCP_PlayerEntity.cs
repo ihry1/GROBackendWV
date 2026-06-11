@@ -61,6 +61,12 @@ namespace QuazalWV
         public float Health = 100f;
         public uint mainWeaponID = 170;  // M27 D10RS (Assault default rifle) — real RoF/tracer props; "Test" 1000 had ~zero -> sporadic/slow tracers
         public uint pistolWeaponID = 339; // P250 (secondary). Was reusing mainWeaponID, so both slots were the M27.
+        public uint armorInventoryID = 1;
+        public uint helmetKey = 0xF8700A85;
+        public byte abilityType = 6;
+        public byte passiveAbilityType = 3;
+        public byte faceID = 1;
+        public byte skinID = 1;
         public uint pid = 0;               // owner persona, set by Entitiy_CMD; drives per-instance custom weapon parts (0 = defaults). NOT serialized.
 
         public OCP_PlayerEntity(uint h)
@@ -116,7 +122,7 @@ namespace QuazalWV
             Helper.WriteU16(m, 0);                         // 20 m_ADSDamage             u16 LE fixed(x10)
             Helper.WriteU16(m, 0);                         // 21 m_PostADSDamage         u16 LE fixed(x10)
             Helper.WriteU8(m, 0);                          // 22 m_bIsInADSCone          u8
-            Helper.WriteU8(m, 1);                          // 23 m_BlitzShieldArmed      u8
+            Helper.WriteU8(m, 0);                          // 23 m_BlitzShieldArmed      u8  <-- was 1: every spawn started shield-ARMED without the arm logic running -> blitz deploy state inconsistent -> rosace stretch coef out of [0.1,10] -> cGestureMix::StretchRosace "invalid stretch" __debugbreak crash on Blitz activate. 0 = stowed (correct spawn state).
             // 24 m_OrderStatus 13B  [0x0A][b12][b11][10 bytes]
             m.Write(new byte[] { 0x0A, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 }, 0, 13);
             Helper.WriteU8(m, 0);                          // 25 m_FireModeType          u8
@@ -151,7 +157,7 @@ namespace QuazalWV
             // ================= AI_EntityDynamic tail (11B) =================
             // AI_EntityDynamic::LoadFrom reads teamID FIRST then classId; the ClassInfo STORE keys on the
             // SECOND read (this->classId @ +0x80). With the Block2 framing fixed (no stray byte), write
-            // teamID then classID(0) so STORE key (pid, classId=0) == reader key (pid, abstract.m_Class=0).
+            // teamID then selected classID so STORE key (pid, classId) == reader key (pid, abstract.m_Class).
             // (The earlier classID-first swap was only compensating for the 1-byte Block2 shift.)
             Helper.WriteU8(m, teamID);                     // teamID            u8 (read first)
             Helper.WriteU8(m, classID);                    // classId           u8 (read second; STORE keys on this == m_Class=0)
@@ -170,14 +176,14 @@ namespace QuazalWV
                 switch ((ClassInfoMemBuffer)i)
                 {
                     case ClassInfoMemBuffer.eMainWeapon:
-                        ClassInfo_Gun mainRifleInfo = new ClassInfo_Gun(mainWeaponID, pid, 1); // loadout slot 1 = primary -> its custom parts
+                        ClassInfo_Gun mainRifleInfo = new ClassInfo_Gun(mainWeaponID, pid, 1, (uint)(4 + classID)); // loadout slot 1 = primary -> its custom parts, from THIS class's loadout bag (4+classID), not hardcoded Assault
                         mainRifleInfo.memBufferSize = Convert.ToByte(mainRifleInfo.MakePayload().Length - 1);
                         buffer = mainRifleInfo.MakePayload();
                         m.Write(buffer, 0, buffer.Length);
                         break;
 
                     case ClassInfoMemBuffer.ePistol:
-                        ClassInfo_Gun pistolInfo = new ClassInfo_Gun(pistolWeaponID, pid, 2); // loadout slot 2 = secondary -> its custom parts
+                        ClassInfo_Gun pistolInfo = new ClassInfo_Gun(pistolWeaponID, pid, 2, (uint)(4 + classID)); // loadout slot 2 = secondary -> its custom parts, from THIS class's loadout bag (4+classID), not hardcoded Assault
                         pistolInfo.memBufferSize = Convert.ToByte(pistolInfo.MakePayload().Length - 1);
                         buffer = pistolInfo.MakePayload();
                         m.Write(buffer, 0, buffer.Length);
@@ -193,7 +199,7 @@ namespace QuazalWV
                         break;
 
                     case ClassInfoMemBuffer.eArmor:
-                        ClassInfo_Armor armorInfo = new ClassInfo_Armor();
+                        ClassInfo_Armor armorInfo = new ClassInfo_Armor(armorInventoryID);
                         armorInfo.memBufferSize = Convert.ToByte(armorInfo.MakePayload().Length - 1);
                         buffer = armorInfo.MakePayload();
                         m.Write(buffer, 0, buffer.Length);
@@ -201,18 +207,18 @@ namespace QuazalWV
 
                     case ClassInfoMemBuffer.eHelmetKey:
                         Helper.WriteU8(m, 4);                 // slot length
-                        Helper.WriteU32LE(m, 0xF8700A85);     // helmet asset key (BE)
+                        Helper.WriteU32LE(m, helmetKey);      // helmet asset key (BE)
                         break;
 
                     case ClassInfoMemBuffer.eAbility:
-                        ClassInfo_Ability abilityInfo = new ClassInfo_Ability(6);
+                        ClassInfo_Ability abilityInfo = new ClassInfo_Ability(abilityType);
                         abilityInfo.memBufferSize = Convert.ToByte(abilityInfo.MakePayload().Length - 1);
                         buffer = abilityInfo.MakePayload();
                         m.Write(buffer, 0, buffer.Length);
                         break;
 
                     case ClassInfoMemBuffer.ePassiveAbility:
-                        ClassInfo_PassiveAbility pasAbilityInfo = new ClassInfo_PassiveAbility(3);
+                        ClassInfo_PassiveAbility pasAbilityInfo = new ClassInfo_PassiveAbility(passiveAbilityType);
                         pasAbilityInfo.memBufferSize = Convert.ToByte(pasAbilityInfo.MakePayload().Length - 1);
                         buffer = pasAbilityInfo.MakePayload();
                         m.Write(buffer, 0, buffer.Length);
@@ -224,7 +230,7 @@ namespace QuazalWV
                         break;
 
                     case ClassInfoMemBuffer.eBody:
-                        buffer = new ClassInfo_Body().MakePayload();  // const size
+                        buffer = new ClassInfo_Body(faceID, skinID).MakePayload();  // const size
                         m.Write(buffer, 0, buffer.Length);
                         break;
                 }

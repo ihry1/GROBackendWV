@@ -45,23 +45,23 @@ namespace QuazalWV
         }
 
         // Per-INSTANCE overload: builds the same blob as ClassInfo_Gun(weaponID), then swaps in the player's
-        // PERSISTED custom component list for the weapon equipped in (loadout bagtype 4, loadoutSlot) -- i.e.
+        // PERSISTED custom component list for the weapon equipped in (loadout bagType=4+classID, loadoutSlot) -- i.e.
         // the parts chosen in the menu customize (StoreService 22/23). Falls back to exactly the by-mapKey
         // default when the player hasn't customized that instance, the weapon is unknown (base ctor fell back
         // to M27), or pid == 0 -- so this is a no-op for every uncustomized weapon.
-        public ClassInfo_Gun(uint weaponID, uint pid, uint loadoutSlot) : this(weaponID)
+        public ClassInfo_Gun(uint weaponID, uint pid, uint loadoutSlot, uint bagType) : this(weaponID)
         {
             if (pid == 0 || this.weaponID != weaponID) return; // pid unset, or base fell back -> keep default/fallback
             try
             {
-                uint invId = DBHelper.ResolveInventoryIdBySlot(pid, 4, loadoutSlot); // loadout bag = bagtype 4
+                uint invId = DBHelper.ResolveInventoryIdBySlot(pid, bagType, loadoutSlot); // loadout bag = bagtype 4+classID (per-class). The old hardcoded 4 (Assault) made EVERY class pull the Assault instance's custom component list -> the Assault weapon's full part set (receiver incl.) was dragged onto Recon/Spec spawns. Root cause of "Recon spawns with my Assault Mk16 + pistol".
                 if (invId == 0) return;
                 List<uint> perInstance = DBHelper.GetWeaponComponentListForInstance(pid, invId, weaponID);
                 if (perInstance != null && perInstance.Count > 0)
                 {
                     componentIds = perInstance;
                     nbComponents = (byte)componentIds.Count;
-                    Log.WriteLine(1, "[DS] in-match weapon " + weaponID + " slot " + loadoutSlot + " built from per-instance list (invId=" + invId + ") comps=[" + string.Join(",", componentIds) + "]", System.Drawing.Color.Lime);
+                    Log.WriteLine(1, "[DS] in-match weapon " + weaponID + " slot " + loadoutSlot + " bag " + bagType + " built from per-instance list (invId=" + invId + ") comps=[" + string.Join(",", componentIds) + "]", System.Drawing.Color.Lime);
                 }
             }
             catch { }
