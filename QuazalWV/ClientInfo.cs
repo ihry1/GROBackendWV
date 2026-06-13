@@ -22,6 +22,12 @@ namespace QuazalWV
         /// Reliable substream sequence ID.
         /// </summary>
         public ushort seqCounterReliable = 1;
+        // PRUDP reliable-fragment retransmit tracker (server->client). Each large RMC response is
+        // fragmented + sent FLAG_RELIABLE; PRUDP makes the SENDER resend any fragment the client does
+        // not ACK. We hold each un-ACKed fragment here (keyed by its reliable seqId) until the ACK
+        // arrives, and a background thread resends timed-out ones. See ReliableRetransmit.
+        public readonly Dictionary<ushort, PendingReliablePacket> pendingReliable = new Dictionary<ushort, PendingReliablePacket>();
+        public readonly object pendingReliableLock = new object();
         public ushort seqCounterDO;
         public ushort callCounterDO_RMC;
         public uint callCounterRMC;

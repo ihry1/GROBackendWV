@@ -43,7 +43,13 @@ namespace QuazalWV
                 client.seqCounter = p.uiSeqId;
             client.udp = udp;
             if (p.flags.Contains(QPacket.PACKETFLAG.FLAG_ACK))
+            {
+                // The client is ACKing one of our reliable fragments (uiSeqId == that fragment's
+                // reliable seq). Clear it from the retransmit tracker so we stop resending it.
+                // (Previously these ACKs were dropped here, so dropped fragments were never recovered.)
+                ReliableRetransmit.Ack(client, p.uiSeqId);
                 return;
+            }
             WriteLog(10, "Handling packet...");
             RMCP rmc = new RMCP(p);
             if (rmc.isRequest)
@@ -455,20 +461,31 @@ namespace QuazalWV
                     np.payload = buff;
                     np.payloadSize = (ushort)np.payload.Length;
                     SeqLog("  OUT-LARGE seq=" + np.uiSeqId + " (relCtr) part=" + np.m_byPartNumber + " flags=[" + FlagStr(np) + "] size=" + np.payloadSize);
-                    Send(client.udp, np, client);
+                    SendTrackedReliable(client, np);
                     // PACE the fragment burst: the client drops back-to-back UDP fragments when the
-                    // server sends them too fast (lobby fails MORE with free RAM = faster server), and
-                    // there is no retransmit -> the client stalls forever waiting on the lost fragment
-                    // ("loading lobby"). A small gap lets the client receive/reassemble each fragment.
-                    // Raised 5->12 (2026-06-12): the SkillsService GetModifiers response grew to ~23KB
-                    // (~26 fragments) after the real-weapon-stats parity data was added; at 5ms the client
-                    // dropped a fragment (line-423 "Cannot Find Weapon Modifier List" on a later weapon).
-                    // More gap per fragment => the client keeps up. If it still drops, implement retransmit.
+                    // server sends them too fast (lobby fails MORE with free RAM = faster server). The
+                    // gap lets the client receive/reassemble each fragment, reducing first-pass drops.
+                    // A dropped fragment is now RECOVERED by ReliableRetransmit (we track each fragment
+                    // by its reliable seq and resend until the client ACKs), so a lost fragment no longer
+                    // stalls the client forever - the pacing just keeps the common case smooth.
                     System.Threading.Thread.Sleep(12);
                     pos += len;
                 }
                 WriteLog(10, "sent packets");
             }
+        }
+
+        // Serialize a reliable fragment ONCE, send it, and register it with ReliableRetransmit so a
+        // dropped fragment is resent (until ACKed) instead of stalling the client forever. We send the
+        // captured bytes directly (rather than via Send(), which re-serializes) so the tracked bytes are
+        // exactly what went on the wire - no reliance on toBuffer() determinism.
+        private static void SendTrackedReliable(ClientInfo client, QPacket np)
+        {
+            byte[] wire = np.toBuffer();
+            WriteLog(10, "send reliable frag seq=" + np.uiSeqId + " (" + wire.Length + "b)");
+            client.udp.Send(wire, wire.Length, client.ep);
+            Log.LogPacket(true, wire);
+            ReliableRetransmit.Track(client, np.uiSeqId, wire, client.udp, client.ep);
         }
 
         public static void Send(UdpClient udp, QPacket p, ClientInfo client)

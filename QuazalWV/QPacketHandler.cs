@@ -175,6 +175,9 @@ namespace QuazalWV
                         if (client != null)
                         {
                             reply = ProcessDISCONNECT(client, p);
+                            // Drop any un-ACKed reliable fragments: the connection is going away and
+                            // seqCounterReliable may reset below, so old tracked seqIds are now stale.
+                            ReliableRetransmit.Clear(client);
                             if(((IPEndPoint)(listener.Client.LocalEndPoint)).Port == 21031)
                                 client.seqCounterReliable = 1;
                         }

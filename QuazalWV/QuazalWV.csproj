@@ -186,6 +186,7 @@
     <Compile Include="Classes\StationInfo.cs" />
     <Compile Include="Classes\StdMaps.cs" />
     <Compile Include="ClientInfo.cs" />
+    <Compile Include="ReliableRetransmit.cs" />
     <Compile Include="DB\AbilityUpgradeModel.cs" />
     <Compile Include="DB\AdModel.cs" />
     <Compile Include="DB\BoostModel.cs" />
