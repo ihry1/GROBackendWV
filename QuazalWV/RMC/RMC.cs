@@ -460,7 +460,11 @@ namespace QuazalWV
                     // server sends them too fast (lobby fails MORE with free RAM = faster server), and
                     // there is no retransmit -> the client stalls forever waiting on the lost fragment
                     // ("loading lobby"). A small gap lets the client receive/reassemble each fragment.
-                    System.Threading.Thread.Sleep(5);
+                    // Raised 5->12 (2026-06-12): the SkillsService GetModifiers response grew to ~23KB
+                    // (~26 fragments) after the real-weapon-stats parity data was added; at 5ms the client
+                    // dropped a fragment (line-423 "Cannot Find Weapon Modifier List" on a later weapon).
+                    // More gap per fragment => the client keeps up. If it still drops, implement retransmit.
+                    System.Threading.Thread.Sleep(12);
                     pos += len;
                 }
                 WriteLog(10, "sent packets");
