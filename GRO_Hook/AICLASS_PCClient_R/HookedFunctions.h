@@ -1440,11 +1440,38 @@ char __fastcall MoodOrder_diag(void* THIS, void* EDX, int newMood)
 // byte969=1 & selectedMode!=8 -> the wrongness is downstream (camera-settings table / iron remap).
 void* (__cdecl* org_ADSmode_diag)(int, void*) = 0;
 static int g_adsmode_n = 0;
+int g_force969 = 0;   // [F969] set from FileExists("_force969_") in DetourMain: when 1, force byte969=1 while aiming
+int g_forcemode3 = 0; // [FM3] set from FileExists("_forcemode3_"): when 1, force base camera mode 3 (->IronMode 21) while aiming
+int g_forcefov = 0;   // [FFOV] set from FileExists("_forcefov_"): when 1, force FOV=50deg while ironF>0.7 (ADS zoom test)
+int g_forceironfov = 0; // [FIFOV] set from FileExists("_forceironfov_"): force the weapon iron-FOV blend target (weapon+1192)=50deg
+float g_eyeback = 0.0f;  // [EYEBACK] meters to pull the rendered eye BACK along the aim heading at full ADS (0=off); from _eyeback_ file content
+float g_lastIronF = 0.0f; // [EYEBACK3] latest iron-sight factor, stored by IronFactor_diag (the render-push hook can't derive it from its node-binding THIS)
+DWORD g_cameraGAO = 0;    // [EYEBACK4] the RENDER camera GAO (AI_CameraBase[5] = *(AI_CameraBase+20), bound to the viewport via CAM_AssignViewportCamToMe), stored by IronFactor_diag
+int   g_wcptOff = 0;       // [WCPTFORCE] legacy single-pair (kept for Source.cpp startup parse; live re-read fills the arrays)
+float g_wcptVal = 0.0f;
+int   g_wcptOffA[4] = { 0, 0, 0, 0 };   // [WCPTFORCE] up to 4 simultaneous live knobs from _wcptforce_ ("<off> <val> <off> <val> ...")
+float g_wcptValA[4] = { 0, 0, 0, 0 };   //   off>=1024: weapon byte-offset (e.g. 1216=scopeKey, 1192=ironFOV target); off<1024: ranged PropertyList propID (e.g. 76=Scope_IronSightOffsetY)
+int   g_wcptN = 0;
+int   g_scopefam = 0;      // [SCOPEFAM] set from FileExists("_scopefam_"): force the swap-scope GAO's viewport families to 0xFFFF while aiming (family-mapping test)
 void* __cdecl ADSmode_diag(int a1, void* a2)
 {
-	// byte969-force test REVERTED 2026-06-08: forcing mode 8 did NOT change standing ADS (and broke prone) ->
-	// the camera MODE index is not the lever; the OTS->iron-sight BLEND is. Back to read-only logging.
+	// 2026-06-08 NOTE: an UNGATED byte969 force "did NOT change standing ADS (and broke prone)". RE-TEST
+	// 2026-06-11 (clean, AIMING-GATED): force byte969=1 ONLY while aiming so SelectStanceCameraMode picks aim
+	// mode 8 (vs the mode-3 third-person fallback) WITHOUT touching prone/other stances. Enabled by a
+	// "_force969_" file (g_force969). Integer-only, BEFORE the original reads byte969. Decisive test of whether
+	// mode 8 == first-person ADS (settles the 06-08 vs 06-10 contradiction). Delete "_force969_" to revert.
+	if (g_force969 && a2)
+	{
+		DWORD fm = *(DWORD*)((char*)a2 + 0x824);       // m_Mood.currValue
+		if (fm & 0x40000)                              // aiming bit only -> prone/other stances untouched
+			*(unsigned char*)((char*)a2 + 0x144D) = 1; // byte969 = 1 (forces aim mode 8)
+	}
 	void* r = org_ADSmode_diag(a1, a2);               // run original (writes the mode to *a1)
+	// [FM3] override the consumed BASE mode to 3 (standing-aim) while aiming, so the downstream IronMode remap
+	// (sub_101B7730, gated dword480==2) makes it 21 -- testing whether the AIM-stance iron camera CENTERS the
+	// eye (vs the idle-stance mode 19 that the gesture-40/replicated-z divert currently selects). _forcemode3_ gated.
+	if (g_forcemode3 && a1 && (*(DWORD*)((char*)a2 + 0x824) & 0x40000))
+		*(int*)a1 = 3;
 	DWORD mood = *(DWORD*)((char*)a2 + 0x824);
 	if ((mood & 0x40000) && g_adsmode_n < 30)         // only while aiming
 	{
@@ -1472,16 +1499,518 @@ double __fastcall IronFactor_diag(void* THIS, void* EDX)
 	double r = org_IronFactor_diag(THIS, EDX);
 	DWORD ctx = ((DWORD*)THIS)[11];
 	DWORD f = ctx ? *(DWORD*)(ctx + 212) : 0xDEADBEEF;
+	if (ctx) g_lastIronF = *(float*)&f;   // [EYEBACK3] feed the render-push hook the live iron factor (same frame, before the matrix push)
+	g_cameraGAO = *(DWORD*)((DWORD)THIS + 20);   // [EYEBACK4] this AI_CameraBase's bound viewport camera GAO (this[5])
+	// [ADSFIX v3] CORRECTED after the static-RE audit. player+0xFA0 is NOT the camera wrapper -- it is a pointer to
+	// the VALUE SLOT of the pawn's "Camera" net-property; the AI_CameraBase wrapper is **(player+0xFA0) (double
+	// deref, cf. AI_EntityPlayer::GetCameraBase @0x100CE650 = mov eax,[ecx+0FA0h]; mov eax,[eax]). v2's single-deref
+	// +44 write was corrupting property-record heap and its gate never passed (REMOVED -- no pointer writes at all;
+	// the wrapper is fully wired by retail InitEntity and ticked per frame; sub_101B0D50 already runs on it).
+	// The fix proper: AI_EntityPawn::UpdateWeaponOpacity @0x100DB8E0 (the ADS fades: weapon body fade-OUT
+	// ramp(ironF,1.0,0.7) x player+0xEF8, swap-scope SIGHT fade-IN ramp(ironF,0.7,0.9) RAW) is normally driven from
+	// AI_EntityPawn::Replica (which runs from BOTH Master and Replica dispatch) -- if that chain is dead on the
+	// emulator the fades never apply. Driving it here is exact-retail and idempotent (pure function of ironF/ch3),
+	// so it is safe whether or not the engine also calls it. Reentrancy guard: it calls GetIronSightFactor twice.
+	{
+		static int   g_adsfix_busy = 0;
+		static int   g_adsfix_n = 0;
+		static DWORD g_adsfix_tick = 0;
+		DWORD nowT = GetTickCount();
+		if (!g_adsfix_busy && playerAddress && (nowT - g_adsfix_tick) >= 10)   // ~once per frame
+		{
+			g_adsfix_tick = nowT;
+			DWORD slot = *(DWORD*)(playerAddress + 0xFA0);                     // "Camera" property value slot
+			DWORD wrap = 0;
+			if (slot >= 0x00010000 && slot < 0x7FFF0000 && (slot & 3) == 0)
+				wrap = *(DWORD*)slot;                                          // the actual AI_CameraBase wrapper
+			if (wrap >= 0x00010000 && wrap < 0x7FFF0000 && (wrap & 3) == 0 && *(DWORD*)(wrap + 44))
+			{
+				g_adsfix_busy = 1;
+				_fxsave(g_mo_fxbuf);
+				((void(__fastcall*)(void*, void*))(baseAddressAI + 0xDB8E0))((void*)playerAddress, 0); // AI_EntityPawn::UpdateWeaponOpacity
+				// [SCOPEFAM] family test (gated by _scopefam_): the scope is attached, positioned at the eye, meshed,
+				// and opacity-1 at full ADS yet invisible -- the last suspect is the ADS render family 0x80 not being
+				// drawn by the displayed viewport. Force the scope's families to 0xFFFF (every layer) while aiming:
+				// if the sight pops in, family mapping is the bug (then find what enables family 0x80 in retail).
+				if (g_scopefam && g_lastIronF > 0.3f)
+				{
+					DWORD wpnF = ((DWORD(__fastcall*)(void*, void*))(baseAddressAI + 0x8BBF0))((void*)playerAddress, 0);
+					if (wpnF >= 0x00010000 && wpnF < 0x7FFF0000 && (wpnF & 3) == 0)
+					{
+						DWORD sgF = *(DWORD*)(wpnF + 0x4BC);
+						if (sgF >= 0x00010000 && sgF < 0x7FFF0000 && (sgF & 3) == 0)
+							((void(__cdecl*)(DWORD, unsigned int, unsigned int))(baseAddressAI + 0x54870))(sgF, 0xFFFF, 0xFFFF); // AIDLL::OBJ_SetViewportFamilies
+					}
+				}
+				_fxrstor(g_mo_fxbuf);
+				g_adsfix_busy = 0;
+				if (g_adsfix_n < 1)
+				{
+					g_adsfix_n++;
+					_fxsave(g_mo_fxbuf);
+					sprintf(buffer, "[ADSFIX] v3: UpdateWeaponOpacity driven (wrapper=%08X via double-deref)\n", wrap);
+					Log(buffer);
+					_fxrstor(g_mo_fxbuf);
+				}
+			}
+		}
+	}
+	// [WCPTFORCE] LIVE-tunable: re-read _wcptforce_ every ~3s so the value can be dialed in WHILE THE GAME RUNS
+	// (edit the file, alt-tab back, see it within seconds -- no restarts). Empty/missing/invalid file = force off.
+	{
+		static DWORD g_wf_lastTick = 0;
+		DWORD wfTick = GetTickCount();
+		if (wfTick - g_wf_lastTick > 3000)
+		{
+			g_wf_lastTick = wfTick;
+			_fxsave(g_mo_fxbuf);
+			int nN = 0; int nOff[4] = { 0,0,0,0 }; float nVal[4] = { 0,0,0,0 };
+			FILE* wfp = fopen("_wcptforce_", "r");
+			if (wfp)
+			{
+				char wb[128] = { 0 };
+				size_t wn = fread(wb, 1, 127, wfp);
+				fclose(wfp);
+				if (wn > 127) wn = 127;
+				wb[wn] = 0;
+				char* wp2 = wb;
+				while (nN < 4)
+				{
+					char* wend = 0;
+					long po = strtol(wp2, &wend, 10);
+					if (wend == wp2) break;
+					wp2 = wend;
+					float pv = (float)strtod(wp2, &wend);
+					if (wend == wp2) break;
+					wp2 = wend;
+					if (po > 0 && po < 2400) { nOff[nN] = (int)po; nVal[nN] = pv; nN++; }
+				}
+			}
+			int changed = (nN != g_wcptN);
+			for (int ci = 0; ci < 4 && !changed; ci++) changed = (nOff[ci] != g_wcptOffA[ci]) || (nVal[ci] != g_wcptValA[ci]);
+			if (changed)
+			{
+				g_wcptN = nN;
+				char* lp = buffer;
+				lp += sprintf(lp, "[WCPTFORCE] live update (%d knobs):", nN);
+				for (int ci = 0; ci < 4; ci++)
+				{
+					g_wcptOffA[ci] = nOff[ci]; g_wcptValA[ci] = nVal[ci];
+					if (ci < nN) lp += sprintf(lp, "  %s %d = %.4f", (nOff[ci] >= 1024) ? "wpn+" : "prop", nOff[ci], nVal[ci]);
+				}
+				sprintf(lp, "\n");
+				Log(buffer);
+			}
+			_fxrstor(g_mo_fxbuf);
+		}
+	}
+	// per-frame force while aiming, up to 4 knobs ("<target> <value>" pairs):
+	//   target >= 1024: raw weapon byte-offset (1192 = iron-FOV blend target; 1216 = scopeKey -- "1216 0" KILLS the scope
+	//                   object so the camera anchor falls back to the weapon's OWN iron line (sub_101B93E0), the test for
+	//                   "the emulator scope GAO's eye joint sits mid-gun");
+	//   target <  1024: PROPERTY ID in the ranged PropertyList @ weapon+0x28 (record propID @ +0xC, value @ +20) --
+	//                   76 = WCPT_Scope_IronSightOffsetY_F (eye sits THIS far behind the iron joint; 0.2 now, rifle ~0.5).
+	if (g_wcptN > 0 && playerAddress && g_lastIronF > 0.01f)
+	{
+		_fxsave(g_mo_fxbuf);
+		DWORD wpf = ((DWORD(__fastcall*)(void*, void*))(baseAddressAI + 0x8BBF0))((void*)playerAddress, 0);
+		if (wpf >= 0x00010000 && wpf < 0x7FFF0000 && (wpf & 3) == 0)
+		{
+			for (int ki = 0; ki < g_wcptN; ki++)
+			{
+				int ko = g_wcptOffA[ki];
+				int koProp = -1, koByte = 0;
+				if (ko >= 2000 && ko < 2400) { koProp = ko - 2000; koByte = 1; }   // "2019 1" = prop 19 as BYTE (e.g. GunHidden_B)
+				else if (ko > 0 && ko < 1024) koProp = ko;                          // float property force
+				if (ko >= 1024 && ko <= 1500)
+				{
+					*(float*)(wpf + ko) = g_wcptValA[ki];
+				}
+				else if (koProp >= 0)
+				{
+					DWORD pcount = *(DWORD*)(wpf + 0x28 + 8);
+					DWORD pbase  = *(DWORD*)(wpf + 0x28 + 0xC);
+					if (pbase >= 0x00010000 && pbase < 0x7FFF0000 && pcount < 400)
+					{
+						for (DWORD pi = 0; pi < pcount; pi++)
+						{
+							DWORD rec = pbase + 24 * pi;
+							if (*(DWORD*)(rec + 0xC) == (DWORD)koProp)
+							{
+								if (koByte) *(unsigned char*)(rec + 20) = (unsigned char)g_wcptValA[ki];
+								else        *(float*)(rec + 20) = g_wcptValA[ki];
+								break;
+							}
+						}
+					}
+				}
+			}
+		}
+		_fxrstor(g_mo_fxbuf);
+	}
 	if (f != g_ironf_last && g_ironf_n < 40)          // log on change only (bounded)
 	{
 		g_ironf_last = f;
 		g_ironf_n++;
 		_fxsave(g_mo_fxbuf);
-		sprintf(buffer, "[IRONF] ironSightFactor=0x%08X  (0x3F800000=1.0 iron, 0=over-shoulder)\n\0", f);
+		// [IRONEYE] the iron-sight EYE OFFSET the camera blend (sub_101B2F10) pulls toward, computed per-frame by
+		// sub_101BA110 (scope branch: scope 'eye' joint; iron branch: weapon iron joint - GetProperty(76)) into
+		// AI_Camera+1380..1388. ZERO at full ADS = the engage path is broken (scope GAO missing its joints / branch
+		// skipped) => camera stays at the stance eye = the symptom. +492 = the blend's ironF copy (cam+212 mirrored).
+		DWORD ie0 = *(DWORD*)(ctx + 1380), ie1 = *(DWORD*)(ctx + 1384), ie2 = *(DWORD*)(ctx + 1388);
+		DWORD f492 = *(DWORD*)(ctx + 492);
+		// [ADSRIG] the FP-rig object at player+0xFA0 (player[1].propModifier_21_CombatProperties.properties.dword0 in
+		// sub_100C9580): the ADS-enter engage hooks [rig+56] to the SCOPE 'eye' joint (hash 80395192) and [rig+68] to the
+		// weapon body joint -- THE mechanism that puts the sight at the camera. rig==0 => hooks silently skipped => arms
+		// detach but the gun stays in the hip pose = "looking over the gun". Logged per ironF change.
+		// [IRONF] probe: wrap = **(player+0xFA0) (the REAL camera wrapper, double deref -- expect == THIS); ch0..ch3 =
+		// the occlusion/opacity channels player+0xEEC/0xEF0/0xEF4/0xEF8, written per frame by AI_EntityPawn::Replica
+		// (SetCameraView sets ch0..2=0, ch3=1 at ironF>0.8). At full ADS: ch0..2==0 => the Replica chain RUNS on our
+		// build; ch0..2 stuck at 1.0 => the pawn's Update->Master->Pawn::Replica dispatch is dead (then [ADSFIX]'s
+		// driven UpdateWeaponOpacity is the only fade source).
+		DWORD wrap2 = 0;
+		DWORD ch0 = 0, ch1 = 0, ch2 = 0, ch3 = 0;
+		// [SCOPE] the three sub-opacity failure modes, distinguished live: hk56 = GAO currently hooked to camera
+		// hook slot 1 (cBlobShadowManager::GetHookInterface(wrap+56) -- should equal the swap-scope GAO during ADS,
+		// 0 = attach never happened); gobj = VIS_uc_GetGraphicObjectCount(scope) (0 = model never async-loaded =>
+		// opacity applies to nothing); spos = scope world pos (far from the camera => not positioned/driven).
+		DWORD hooked56 = 0, scopeGAO2 = 0; int hkIdx = -1, gobj = -1;
+		float spos[3] = { 0, 0, 0 };
+		if (playerAddress)
+		{
+			DWORD slot2 = *(DWORD*)(playerAddress + 0xFA0);
+			if (slot2 >= 0x00010000 && slot2 < 0x7FFF0000 && (slot2 & 3) == 0)
+				wrap2 = *(DWORD*)slot2;
+			ch0 = *(DWORD*)(playerAddress + 0xEEC);
+			ch1 = *(DWORD*)(playerAddress + 0xEF0);
+			ch2 = *(DWORD*)(playerAddress + 0xEF4);
+			ch3 = *(DWORD*)(playerAddress + 0xEF8);
+			if (wrap2 >= 0x00010000 && wrap2 < 0x7FFF0000 && (wrap2 & 3) == 0)
+			{
+				hkIdx = *(unsigned char*)(wrap2 + 64);   // holder@+56 hook index byte (+8); 0xFF = never bound
+				hooked56 = ((DWORD(__fastcall*)(void*, void*))(baseAddressAI + 0x2EC10))((void*)(wrap2 + 56), 0); // Holder::GetHooked
+			}
+			DWORD wpn3 = ((DWORD(__fastcall*)(void*, void*))(baseAddressAI + 0x8BBF0))((void*)playerAddress, 0);
+			if (wpn3 >= 0x00010000 && wpn3 < 0x7FFF0000 && (wpn3 & 3) == 0)
+			{
+				scopeGAO2 = *(DWORD*)(wpn3 + 0x4BC);
+				if (scopeGAO2 >= 0x00010000 && scopeGAO2 < 0x7FFF0000 && (scopeGAO2 & 3) == 0)
+				{
+					gobj = (unsigned char)((char(__cdecl*)(DWORD))(baseAddressAI + 0x62700))(scopeGAO2);   // VIS_uc_GetGraphicObjectCount
+					((float*(__cdecl*)(float*, int))(baseAddressAI + 0x12D30))(spos, (int)scopeGAO2);      // OBJ_vGetPos
+				}
+			}
+		}
+		// [SREL] scope position relative to the RENDER EYE, same frame: fwd = how far the scope GAO origin sits IN
+		// FRONT of the camera along the aim heading (NEGATIVE = behind the camera = invisible, the user's hypothesis);
+		// up = height vs the eye. Eye = AI_Camera final eye ctx+472..480; heading = OBJ_vGetYaxis(pawn GAO).
+		float srelF = -999.0f, srelU = -999.0f;
+		if (ctx && playerAddress && scopeGAO2)
+		{
+			DWORD ce0 = *(DWORD*)(ctx + 472), ce1 = *(DWORD*)(ctx + 476), ce2 = *(DWORD*)(ctx + 480);
+			DWORD pg2 = *(DWORD*)(playerAddress + 0x14);
+			if (pg2 >= 0x00010000 && pg2 < 0x7FFF0000 && (pg2 & 3) == 0)
+			{
+				float hYp[3] = { 0, 0, 0 };
+				((float*(__cdecl*)(float*, int))(baseAddressAI + 0x72D90))(hYp, (int)pg2);   // OBJ_vGetYaxis = aim heading
+				srelF = (spos[0] - *(float*)&ce0) * hYp[0] + (spos[1] - *(float*)&ce1) * hYp[1];
+				srelU = spos[2] - *(float*)&ce2;
+			}
+		}
+		// [OVERLAY] the HUD scope-overlay gate (cPlayerHUD::CrossHair_Update): overlay shows iff adsBlend>0.9 AND
+		// player+0x480 == 2 (the ADS view-mode enum; setter vmt+0x214 has no in-DLL callers = script/engine-driven)
+		// AND bIsGunHidden(weapon). m480 != 2 with an overlay scope equipped = the mode never gets set (next lever).
+		int m480 = -1, gunHid = -1;
+		if (playerAddress)
+		{
+			m480 = *(int*)(playerAddress + 0x480);
+			DWORD wpn4 = ((DWORD(__fastcall*)(void*, void*))(baseAddressAI + 0x8BBF0))((void*)playerAddress, 0);
+			if (wpn4 >= 0x00010000 && wpn4 < 0x7FFF0000 && (wpn4 & 3) == 0)
+				gunHid = (unsigned char)((char(__fastcall*)(void*, void*))(baseAddressAI + 0x642C0))((void*)wpn4, 0); // bIsGunHidden
+		}
+		sprintf(buffer, "[IRONF] ironF=0x%08X ch=(%.2f,%.2f,%.2f,%.2f) scope=%08X hk56=%08X gobj=%d srel=(fwd %.3f, up %.3f) m480=%d gunHid=%d\n",
+			f, *(float*)&ch0, *(float*)&ch1, *(float*)&ch2, *(float*)&ch3,
+			scopeGAO2, hooked56, gobj, srelF, srelU, m480, gunHid);
 		Log(buffer);
+		// [ZOPT] one-shot dump of the zen iron-sight camera-options block (sub_101FE810()+88) that sub_101B9830 builds
+		// the iron camera FRAME from (+0x00..0x2C base vectors, +0x30/+0x34 scalars, +0x3C/40/44 offset scale,
+		// +0x48/4C/50 stance/scope/jump factors). ALL-ZERO = the options never loaded = iron frame collapses to the
+		// stance eye = "camera never travels to the gun" root cause.
+		{
+			static int g_zopt_n = 0;
+			if (g_zopt_n < 1)
+			{
+				g_zopt_n++;
+				DWORD zo = ((DWORD(__cdecl*)())(baseAddressAI + 0x1FE810))();
+				if (zo >= 0x00010000 && zo < 0x7FFF0000)
+				{
+					DWORD zb = *(DWORD*)(zo + 88);
+					if (zb >= 0x00010000 && zb < 0x7FFF0000)
+					{
+						char* zp = buffer;
+						zp += sprintf(zp, "[ZOPT] blk=%08X:", zb);
+						for (int zi = 0; zi < 24; zi++) zp += sprintf(zp, " %08X", *(DWORD*)(zb + zi * 4));
+						sprintf(zp, "\n");
+						Log(buffer);
+					}
+					else { sprintf(buffer, "[ZOPT] blk INVALID (%08X)\n", zb); Log(buffer); }
+				}
+			}
+		}
 		_fxrstor(g_mo_fxbuf);
 	}
 	return r;
+}
+
+// [VGP] REAL rendered camera position via a SAFE hook on AI_CameraBase::vGetPos (0x101B0E90, __thiscall(this, out)).
+// The earlier crash came from CALLING vGetPos mid-ApplyStanceCameraSettings (the camera matrix was being rebuilt);
+// this HOOKS it instead -- the GAME calls vGetPos at its own safe time and we just read the filled output (out =
+// the camera world-matrix translation). Logs the camera world pos vs the iron-sight factor (camera ctx[11]+212) on
+// factor-change, capturing the hip<->iron camera trajectory. Read-only, capped, FP-safe; no mid-update call; the
+// ctx pointer is range-guarded before the factor read.
+float* (__fastcall* org_vGetPos_diag)(void*, void*, float*) = 0;
+static int   g_vgp_n = 0;
+static DWORD g_vgp_lastF = 0xFFFFFFFF;
+float* __fastcall vGetPos_diag(void* THIS, void* EDX, float* out)
+{
+	float* r = org_vGetPos_diag(THIS, EDX, out);   // game fills `out` = camera world position (safe call timing)
+	if (out && THIS && g_vgp_n < 140)
+	{
+		DWORD ctx = ((DWORD*)THIS)[11];            // AI_CameraBase context (GetIronSightFactor's value lives @ ctx+212)
+		if (ctx >= 0x00010000 && ctx < 0x7FFF0000 && (ctx & 3) == 0)
+		{
+			DWORD fb = *(DWORD*)(ctx + 212);       // ironSightFactor raw bits (0 = hip/over-shoulder, 0x3F800000 = full iron)
+			if (fb != g_vgp_lastF)                 // log only on factor change -> the hip<->iron ramp
+			{
+				g_vgp_lastF = fb;
+				g_vgp_n++;
+				_fxsave(g_mo_fxbuf);
+				sprintf(buffer, "[VGP] ironF=%.3f camPos=(%.3f, %.3f, %.3f)\n", *(float*)&fb, out[0], out[1], out[2]);
+				Log(buffer);
+				// [GEOM] same-frame body-relative camera read. Resolve the local pawn (playerAddress, set by the
+				// UpdateWarning hook), then engine getters: OBJ_vGetPos @0x12D30 (GAO feet world pos) + OBJ_vGetYaxis
+				// @0x72D90 (heading Y-axis). Offline: project (cam-feet) onto headY -> fwd/back (camera BEHIND = OTS),
+				// perpendicular -> lateral (over-shoulder), z-(feet.z) -> eye height. Splits "camera slung
+				// over-the-shoulder (camera bug)" vs "camera at the eye (=> the GUN/aim-pose is the culprit)".
+				if (playerAddress)
+				{
+					DWORD pgao = *(DWORD*)(playerAddress + 0x14);   // pawn->gameObject (GAO)
+					if (pgao >= 0x00010000 && pgao < 0x7FFF0000 && (pgao & 3) == 0)
+					{
+						float feet[3] = { 0, 0, 0 }, hY[3] = { 0, 0, 0 };
+						((float*(__cdecl*)(float*, int))(baseAddressAI + 0x12D30))(feet, (int)pgao);  // OBJ_vGetPos
+						((float*(__cdecl*)(float*, int))(baseAddressAI + 0x72D90))(hY,   (int)pgao);  // OBJ_vGetYaxis
+						// [GUN] weapon iron-sight WORLD pos (SetCameraView recipe): GetWeaponComponent(pawn) ->
+						// weapon+912 (joint handle) / +916 (subIdx) -> zen::GetJointGlobal (0xD96C0) writes the joint
+						// matrix; world translation is at floats [4]/[5]/[6] (per sub_100D9250). Splits "eye sits
+						// beside the sight line (camera 0.20m lateral)" vs "gun held LOW (aim-pose)": compare gun.z to
+						// cam.z (eye height) and gun vs cam along/perp to heading.
+						float gun[3] = { 0, 0, 0 }; int gunOK = 0;
+						DWORD ironFov84 = 0xFFFFFFFF, ironFov92 = 0xFFFFFFFF;  // weapon iron-FOV fields (degrees, raw bits)
+						DWORD wpn = ((DWORD(__fastcall*)(void*, void*))(baseAddressAI + 0x8BBF0))((void*)playerAddress, 0);
+						if (wpn >= 0x00010000 && wpn < 0x7FFF0000 && (wpn & 3) == 0)
+						{
+							ironFov84 = *(DWORD*)(wpn + 1184);   // WCPT_IronSight_FOV (sub_101B4100 path)
+							ironFov92 = *(DWORD*)(wpn + 1192);   // iron FOV the gameplay path (sub_101B4060) blends TOWARD
+								// [PROPS] one-shot structured dump of the weapon's RANGED property list (PropertyDataBasePC::
+								// PropertyList @ weapon+0x28: count @ +8, 24-byte record array base @ +0xC; record: propID @ +0xC,
+								// value @ +20). Finds WCPT_Scope_IronSightOffsetY_F by ID (FOV=90.0 anchors the ID convention).
+								{
+									static int g_props_n = 0;
+									DWORD pcount = *(DWORD*)(wpn + 0x28 + 8);
+									DWORD pbase  = *(DWORD*)(wpn + 0x28 + 0xC);
+									if (g_props_n < 1 && pbase >= 0x00010000 && pbase < 0x7FFF0000 && pcount > 0 && pcount < 400)
+									{
+										g_props_n++;
+										sprintf(buffer, "[PROPS] list@wpn+0x28 count=%d base=%08X (idx:propID:valueBits)\n", pcount, pbase);
+										Log(buffer);
+										for (DWORD pi = 0; pi < pcount; pi += 8)
+										{
+											char* pp = buffer;
+											pp += sprintf(pp, "[PROPS]");
+											for (DWORD pj = pi; pj < pi + 8 && pj < pcount; pj++)
+											{
+												DWORD rec = pbase + 24 * pj;
+												pp += sprintf(pp, " %d:%03X:%08X", pj, *(DWORD*)(rec + 0xC), *(DWORD*)(rec + 20));
+											}
+											sprintf(pp, "\n");
+											Log(buffer);
+										}
+									}
+								}
+							// [FIFOV] zoom-via-data test: set the weapon's iron-FOV blend TARGET to 50deg so the EXISTING
+							// blend (sub_101B4060) zooms ADS smoothly. SAFE (sets source data, not a mid-pipeline value).
+							if (g_forceironfov) *(float*)(wpn + 1192) = 50.0f;
+							DWORD ironH = *(DWORD*)(wpn + 912);
+							if (ironH)
+							{
+								int jbuf[20];
+								((int*(__cdecl*)(int*, int, unsigned char))(baseAddressAI + 0xD96C0))(jbuf, (int)ironH, *(unsigned char*)(wpn + 916));
+								gun[0] = ((float*)jbuf)[4]; gun[1] = ((float*)jbuf)[5]; gun[2] = ((float*)jbuf)[6];
+								gunOK = 1;
+							}
+						}
+						sprintf(buffer, "[GEOM] cam=(%.3f,%.3f,%.3f) feet=(%.3f,%.3f,%.3f) headY=(%.3f,%.3f,%.3f) gunOK=%d gunIron=(%.3f,%.3f,%.3f) ironFOV84=0x%08X ironFOV92=0x%08X\n",
+							out[0], out[1], out[2], feet[0], feet[1], feet[2], hY[0], hY[1], hY[2], gunOK, gun[0], gun[1], gun[2], ironFov84, ironFov92);
+						Log(buffer);
+					}
+				}
+				_fxrstor(g_mo_fxbuf);
+			}
+		}
+	}
+	return r;
+}
+
+// [EYEBACK3] THE render-camera push. The 2.0m tests on cam+472 / camera[11]+0x44 were pixel-identical -> those are the
+// GAMEPLAY camera (what vGetPos queries). The RENDERER reads a Yeti viewport node set via:
+//   AI_Camera::Update -> sub_101B2560 -> sub_101B1930(this, a2) -> qmemcpy(this+20,a2,0x40); OBJ_SetMatrix(this[2], a2)
+// a2 is the final 4x4 row-major camera matrix; its translation is at +0x30 = M[12]/M[13]/M[14]. We hook sub_101B1930
+// and pull that translation BACK along the aim heading (scaled by ironF) BEFORE the original caches+pushes it, so the
+// viewport node receives the pulled-back eye -> the GPU renders it. this = cam+372, so camera = this-372 and we gate to
+// the LOCAL player camera via camera+12 == playerAddress (the followed AI_EntityPlayer), while aiming (ironF in (0.01,1]).
+const char* (__fastcall* org_RenderMatrixPush_diag)(void*, void*, void*) = 0;
+static int g_eb3_n = 0;
+const char* __fastcall RenderMatrixPush_diag(void* THIS, void* EDX, void* a2)
+{
+	// Gate on the LIVE iron factor (g_lastIronF, fed by IronFactor_diag this same frame) + playerAddress -- NOT on THIS's
+	// layout (THIS is a node-binding object, not the AI_Camera; cam+12/ectx were bogus). a2 IS the render matrix, eye at
+	// row-major M[12]/M[13]/M[14] (confirmed: tRow matched the [GEOM] eye, tCol was zero).
+	if (a2 && playerAddress && g_eyeback != 0.0f && g_lastIronF > 0.01f && g_lastIronF <= 1.0f)
+	{
+		DWORD pgao = *(DWORD*)(playerAddress + 0x14);
+		if (pgao >= 0x00010000 && pgao < 0x7FFF0000 && (pgao & 3) == 0)
+		{
+			_fxsave(g_mo_fxbuf);
+			float hY[3] = { 0, 0, 0 };
+			((float*(__cdecl*)(float*, int))(baseAddressAI + 0x72D90))(hY, (int)pgao);  // OBJ_vGetYaxis = aim heading
+			float* M = (float*)a2;
+			float bx = M[12], by = M[13], bz = M[14];
+			float s = g_eyeback * g_lastIronF;          // smooth ramp: 0 at hip -> g_eyeback m at full ADS
+			M[12] = bx - hY[0] * s;
+			M[13] = by - hY[1] * s;
+			M[14] = bz - hY[2] * s;
+			if (g_eb3_n < 8)
+			{
+				g_eb3_n++;
+				sprintf(buffer, "[EYEBACK3] applied ironF=%.3f s=%.3f eye (%.3f,%.3f,%.3f)->(%.3f,%.3f,%.3f) headY=(%.3f,%.3f,%.3f)\n",
+					g_lastIronF, s, bx, by, bz, M[12], M[13], M[14], hY[0], hY[1], hY[2]);
+				Log(buffer);
+			}
+			_fxrstor(g_mo_fxbuf);
+		}
+	}
+	return org_RenderMatrixPush_diag(THIS, EDX, a2);   // original caches (this+20) + OBJ_SetMatrix(this[2], a2) the modified matrix
+}
+
+// [EYEBACK4] hook AIDLL::OBJ_SetMatrix(node, matrix) @0x10061FC0 -- the GAO->engine matrix bridge. Gate to the RENDER
+// camera GAO (g_cameraGAO = AI_CameraBase[5], the viewport-bound camera) so we catch the EXACT write the renderer
+// reads, wherever it is issued. sub_101B1930's OBJ_SetMatrix targeted a DIFFERENT node (gameplay/HUD camera -> no
+// visual change despite a correct 2m edit). If [EYEBACK4] lines appear, the render camera GAO IS set via OBJ_SetMatrix
+// and we pull its translation back here; if none appear, the viewport camera is written by another path (engine-side).
+const char* (__cdecl* org_SetMatrix_diag)(int, void*) = 0;
+static int g_sm_n = 0;
+const char* __cdecl SetMatrix_diag(int node, void* matrix)
+{
+	if (matrix && g_cameraGAO && node == (int)g_cameraGAO)
+	{
+		float* M = (float*)matrix;
+		// confirm the render camera GAO IS set via OBJ_SetMatrix (capped log)
+		if (g_sm_n < 12)
+		{
+			_fxsave(g_mo_fxbuf);
+			g_sm_n++;
+			sprintf(buffer, "[EYEBACK4] cameraGAO=%08X SetMatrix ironF=%.3f trans=(%.3f,%.3f,%.3f)\n",
+				node, g_lastIronF, M[12], M[13], M[14]);
+			Log(buffer);
+			_fxrstor(g_mo_fxbuf);
+		}
+		// pull the render camera translation back along the aim heading while aiming
+		if (playerAddress && g_eyeback != 0.0f && g_lastIronF > 0.01f && g_lastIronF <= 1.0f)
+		{
+			DWORD pgao = *(DWORD*)(playerAddress + 0x14);
+			if (pgao >= 0x00010000 && pgao < 0x7FFF0000 && (pgao & 3) == 0)
+			{
+				_fxsave(g_mo_fxbuf);
+				float hY[3] = { 0, 0, 0 };
+				((float*(__cdecl*)(float*, int))(baseAddressAI + 0x72D90))(hY, (int)pgao);  // OBJ_vGetYaxis = aim heading
+				float s = g_eyeback * g_lastIronF;
+				M[12] -= hY[0] * s; M[13] -= hY[1] * s; M[14] -= hY[2] * s;
+				_fxrstor(g_mo_fxbuf);
+			}
+		}
+	}
+	return org_SetMatrix_diag(node, matrix);
+}
+
+// [FOV] iron-sight FOV diag (installed with "_moodorder_"): hook sub_101B4100 @0x101B4100 -- the camera FOV loader.
+// It sets the camera FOV (a3+112): if the stance-table entry's +402 flag is set AND the weapon exists, FOV =
+// weapon iron FOV (weapon+1184 = WCPT_IronSight_FOV); else the per-stance table FOV (clamped). Logs, on change for
+// the LOCAL pawn (THIS == playerAddress = the AI_EntityPlayer): the flag (is the weapon-FOV path taken?), the
+// APPLIED FOV bits (a3+112), and the weapon's carried iron FOV bits (weapon+1184). Splits "ADS not zooming" into
+// weapon-FOV-wrong/0 vs flag-not-set vs applied-but-==-hip. Raw float bits; fxsave/fxrstor-bracketed; integer log.
+void (__fastcall* org_ApplyFov_diag)(void*, void*, int, int) = 0;
+__declspec(align(16)) static unsigned char g_fov_fxbuf[512];
+static int   g_fov_init = 0;
+static int   g_fov_pFlag = -1;
+static DWORD g_fov_pApplied = 0xFFFFFFFF;
+static DWORD g_fov_pWpn = 0xFFFFFFFF;
+void __fastcall ApplyFov_diag(void* THIS, void* EDX, int a2, int a3)
+{
+	org_ApplyFov_diag(THIS, EDX, a2, a3);          // run original first (sets a3+112 = FOV)
+	// sub_101B4100's THIS is the CAMERA object (touches m_ShootPosition/vec220), NOT the pawn; the camera's
+	// entity ref (the pawn) is at *(camera+12) (= sub_101B4100's this[3]). Gate to the LOCAL player's camera.
+	if (!playerAddress) return;
+	DWORD camPawn = *(DWORD*)((DWORD)THIS + 12);
+	if (camPawn != playerAddress) return;
+	// [FFOV] zoom test: once the iron blend is engaged (AI_CameraBase ironSightFactor @ camera[11]+212 > ~0.7),
+	// force the FOV to 50 deg to confirm whether "looking over the gun" is just a missing ADS zoom. Integer-only
+	// (raw float bits: 0x3F333333 = 0.7, 0x42480000 = 50.0). a3+112 is the game's FOV field -> persists after return.
+	if (g_forcefov)
+	{
+		DWORD ffctx = *(DWORD*)((DWORD)THIS + 44);   // camera[11] = AI_CameraBase context
+		if (ffctx >= 0x00010000 && ffctx < 0x7FFF0000 && (ffctx & 3) == 0 && *(DWORD*)(ffctx + 212) > 0x3F333333)
+			*(DWORD*)(a3 + 112) = 0x42480000;        // FOV = 50.0 deg
+	}
+	_fxsave(g_fov_fxbuf);
+	int   flag    = *(unsigned char*)(a2 + 402);   // table entry +402: use-weapon-FOV flag (iron stance)
+	DWORD applied = *(DWORD*)(a3 + 112);           // the FOV that was set (raw bits)
+	DWORD wpnFov  = 0xFFFFFFFF;
+	DWORD wpn = ((DWORD(__fastcall*)(void*, void*))(baseAddressAI + 0x8BBF0))((void*)camPawn, 0); // GetWeaponComponent(pawn)
+	if (wpn >= 0x00010000 && wpn < 0x7FFF0000 && (wpn & 3) == 0)
+		wpnFov = *(DWORD*)(wpn + 1184);            // weapon iron FOV (WCPT_IronSight_FOV), raw bits
+	if (!g_fov_init || flag != g_fov_pFlag || applied != g_fov_pApplied || wpnFov != g_fov_pWpn)
+	{
+		g_fov_init = 1; g_fov_pFlag = flag; g_fov_pApplied = applied; g_fov_pWpn = wpnFov;
+		sprintf(buffer, "[FOV] useWeaponFov=%d(tbl+402) appliedFOV=0x%08X weaponIronFOV(+1184)=0x%08X\n", flag, applied, wpnFov);
+		Log(buffer);
+	}
+	_fxrstor(g_fov_fxbuf);
+}
+
+// [SETFOV] FINAL gameplay FOV bridge diag (installed with "_moodorder_"): hook AIDLL::CAM_SetFieldOfView_0
+// @0x10174AD0 (__cdecl(char viewport, float fov_RADIANS)) -- the ACTUAL FOV handed to the engine
+// (ptr_BigStructure+460), fed by camera::CameraBase::SetFocal / sub_101B4060 (which BLENDS toward the weapon iron
+// FOV weapon+1192 by the iron factor camera+212). THE definitive hip-vs-ADS zoom read: log viewport + FOV bits on
+// change. Read-only (no forcing -> no crash). rad bits ref: 1.5708(=pi/2)=0x3FC90FDB(90deg); ~45deg=0x3F490FDB.
+int (__cdecl* org_SetFov_diag)(char, float) = 0;
+__declspec(align(16)) static unsigned char g_sf_fxbuf[512];
+static int   g_sf_init = 0;
+static int   g_sf_pVp = -999;
+static DWORD g_sf_pFov = 0xFFFFFFFF;
+int __cdecl SetFov_diag(char a1, float a2)
+{
+	int   vp  = (unsigned char)a1;
+	DWORD fov = *(DWORD*)&a2;          // raw bits of the FOV (radians); no FP used
+	if (!g_sf_init || vp != g_sf_pVp || fov != g_sf_pFov)
+	{
+		g_sf_init = 1; g_sf_pVp = vp; g_sf_pFov = fov;
+		_fxsave(g_sf_fxbuf);
+		sprintf(buffer, "[SETFOV] viewport=%d fovRadBits=0x%08X\n", vp, fov);
+		Log(buffer);
+		_fxrstor(g_sf_fxbuf);
+	}
+	return org_SetFov_diag(a1, a2);
 }
 
 // [ACS] CONSUMED stance-camera offset diag (installed with "_moodorder_"): hook AI_Camera_ApplyStanceCameraSettings

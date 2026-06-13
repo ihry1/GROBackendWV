@@ -362,10 +362,76 @@ void DetourMain()
 		Log("Hooked AI_EntityHuman::Order_ChangeMood (mood-order diag)\n");
 		org_ADSmode_diag = (void*(__cdecl*)(int,void*)) DetourFunction((PBYTE)(baseAddressAI + 0x1B6F20), (PBYTE)ADSmode_diag);
 		Log("Hooked AI_Camera_SelectStanceCameraMode ([CAM] ADS mode diag)\n");
+		// [F969] DECISIVE TEST: if a "_force969_" file exists, ADSmode_diag forces byte969=1 while aiming so the
+		// selector picks aim mode 8. Watch the [CAM] line (selectedMode should become 8) + observe the camera:
+		// first-person => mode 8 IS the lever; still third-person => byte969 is a dead end (confirms 06-08).
+		g_force969 = FileExists("_force969_") ? 1 : 0;
+		if (g_force969) Log("[F969] FORCE byte969=1 while aiming ENABLED (_force969_) -- testing whether mode 8 == first-person ADS\n");
+		g_forcemode3 = FileExists("_forcemode3_") ? 1 : 0;
+		if (g_forcemode3) Log("[FM3] FORCE base camera mode 3 (->IronMode 21) while aiming ENABLED (_forcemode3_) -- testing if the aim-stance iron cam centers the eye\n");
+		g_forcefov = FileExists("_forcefov_") ? 1 : 0;
+		if (g_forcefov) Log("[FFOV] FORCE FOV=50deg while ADS (ironF>0.7) ENABLED (_forcefov_) -- testing if zoom fixes 'looking over the gun'\n");
+		g_forceironfov = FileExists("_forceironfov_") ? 1 : 0;
+		if (g_forceironfov) Log("[FIFOV] FORCE weapon iron-FOV blend target (weapon+1192)=50deg ENABLED (_forceironfov_) -- ADS should zoom smoothly via the existing blend\n");
+		g_scopefam = FileExists("_scopefam_") ? 1 : 0;
+		if (g_scopefam) Log("[SCOPEFAM] FORCE swap-scope viewport families = 0xFFFF while aiming ENABLED (_scopefam_) -- family-mapping test\n");
+		// [EYEBACK] ADS cheek-weld fix: pull the rendered eye back along the aim heading at full ADS by g_eyeback meters.
+		// Tunable WITHOUT rebuilds: put a number (meters) in the _eyeback_ file (e.g. 0.20). Empty file -> 0.25 default.
+		g_eyeback = 0.0f;
+		{
+			FILE* fpb = fopen("_eyeback_", "r");
+			if (fpb)
+			{
+				char ebuf[32] = { 0 };
+				size_t en = fread(ebuf, 1, 31, fpb);
+				fclose(fpb);
+				if (en > 31) en = 31;
+				ebuf[en] = 0;
+				g_eyeback = (float)atof(ebuf);
+				if (g_eyeback == 0.0f) g_eyeback = 0.25f;   // file present but empty/zero -> default test amount
+				char elg[160];
+				sprintf(elg, "[EYEBACK] ADS eye pull-back = %.3f m at full ADS ENABLED (_eyeback_) -- testing the 1.0x cheek-weld distance\n", g_eyeback);
+				Log(elg);
+			}
+		}
+		// [WCPTFORCE] iron-sight offset sweep: put "<weaponByteOffset> <value>" in _wcptforce_ (e.g. "1204 0.3") to
+		// write that float at weapon+offset while aiming. Sweep offsets (1200/1204/1208/1196...) to find the gun's view-Y.
+		g_wcptOff = 0; g_wcptVal = 0.0f;
+		{
+			FILE* fpw = fopen("_wcptforce_", "r");
+			if (fpw)
+			{
+				char wbuf[64] = { 0 };
+				size_t wn = fread(wbuf, 1, 63, fpw);
+				fclose(fpw);
+				if (wn > 63) wn = 63;
+				wbuf[wn] = 0;
+				int wo = 0; float wv = 0.0f;
+				if (sscanf(wbuf, "%d %f", &wo, &wv) == 2 && wo > 0 && wo <= 1500)
+				{
+					g_wcptOff = wo; g_wcptVal = wv;
+					char wlg[160];
+					sprintf(wlg, "[WCPTFORCE] forcing %s %d = %.4f while aiming (_wcptforce_)\n",
+						(wo >= 1024) ? "weapon byte-offset" : "PropertyList propID", g_wcptOff, g_wcptVal);
+					Log(wlg);
+				}
+			}
+		}
 		org_IronFactor_diag = (double(__fastcall*)(void*,void*)) DetourFunction((PBYTE)(baseAddressAI + 0x1B0760), (PBYTE)IronFactor_diag);
 		Log("Hooked AI_CameraBase::GetIronSightFactor ([IRONF] iron-blend diag)\n");
 		org_ApplyStanceCam_diag = (int(__fastcall*)(void*,void*)) DetourFunction((PBYTE)(baseAddressAI + 0x1B7900), (PBYTE)ApplyStanceCam_diag);
 		Log("Hooked AI_Camera_ApplyStanceCameraSettings ([ACS] consumed-mode + over-shoulder offset diag)\n");
+		org_RenderMatrixPush_diag = (const char*(__fastcall*)(void*,void*,void*)) DetourFunction((PBYTE)(baseAddressAI + 0x1B1930), (PBYTE)RenderMatrixPush_diag);
+		Log("Hooked sub_101B1930 ([EYEBACK3] ADS eye pull-back at the RENDER viewport-matrix push -- _eyeback_)\n");
+		org_SetMatrix_diag = (const char*(__cdecl*)(int,void*)) DetourFunction((PBYTE)(baseAddressAI + 0x61FC0), (PBYTE)SetMatrix_diag);
+		Log("Hooked AIDLL::OBJ_SetMatrix ([EYEBACK4] ADS eye pull-back gated to the render camera GAO -- _eyeback_)\n");
+		org_vGetPos_diag = (float*(__fastcall*)(void*,void*,float*)) DetourFunction((PBYTE)(baseAddressAI + 0x1B0E90), (PBYTE)vGetPos_diag);
+		Log("Hooked AI_CameraBase::vGetPos ([VGP] real rendered camera position diag)\n");
+		ExportPlayerAddress();   // [GEOM] needs playerAddress (local pawn) for the body-relative camera read
+		org_ApplyFov_diag = (void(__fastcall*)(void*,void*,int,int)) DetourFunction((PBYTE)(baseAddressAI + 0x1B4100), (PBYTE)ApplyFov_diag);
+		Log("Hooked sub_101B4100 ([FOV] iron-sight FOV diag)\n");
+		org_SetFov_diag = (int(__cdecl*)(char,float)) DetourFunction((PBYTE)(baseAddressAI + 0x174AD0), (PBYTE)SetFov_diag);
+		Log("Hooked AIDLL::CAM_SetFieldOfView_0 ([SETFOV] final gameplay FOV diag)\n");
 	}
 	//ReplaceVelocity();
 	//ZEN_Init(baseAddressAI);
