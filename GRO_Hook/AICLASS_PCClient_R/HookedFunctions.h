@@ -1487,6 +1487,77 @@ void* __cdecl ADSmode_diag(int a1, void* a2)
 	return r;
 }
 
+// [BLITZFIX] Blitz-deploy crash containment + diagnostic. Flag-gated by "_blitzfix_" (Source.cpp DetourMain).
+// cGestureMix::StretchRosace @0x100eb1e0 runs rev_SendErrorMessage + __debugbreak (an assert) when the anim
+// stretch coefficient is <= 0.1 or >= 10.0. Activating Blitz sets mood bit 16 -> selects rosace descriptor 17,
+// whose loaded +44 stretch coef is out of that range -> crash the instant the shield deploys. We CLAMP an
+// out-of-range coef to a neutral 1.0 so the assert passes and Blitz deploys normally, and LOG the real coef so
+// the root cause is pinned (0/garbage => wrong/uninitialized descriptor; a real extreme => bad anim DATA). The
+// clamp is PURE INTEGER bit-math (no FP) so it cannot perturb the gesture/anim x87/SSE state; only the rare %f
+// log is _fxsave-bracketed. 0.1f=0x3DCCCCCD, 10.0f=0x41200000, 1.0f=0x3F800000 (positive IEEE-754 bits are
+// monotonic with magnitude; the sign/NaN/inf cases also clamp). Delete "_blitzfix_" to revert to native behavior.
+__declspec(align(16)) static unsigned char g_blitz_fxbuf[512];
+const char* (__fastcall* org_StretchRosace_blitzfix)(void*, void*, float) = 0;
+static int g_blitz_n = 0;
+int g_blitzclamp = 0;   // [BLITZFIX]  set from FileExists("_blitzfix_"): clamp the coef so Blitz deploys
+int g_blitzprobe = 0;   // [BLITZPROBE] set from FileExists("_blitzprobe_"): log the decisive deploy/bank-load state
+const char* __fastcall StretchRosace_blitzfix(void* THIS, void* EDX, float a2)
+{
+	DWORD bits = *(DWORD*)&a2;
+	DWORD mag  = bits & 0x7FFFFFFF;
+	int clampIt = (bits & 0x80000000) || (mag <= 0x3DCCCCCDu) || (mag >= 0x41200000u);
+	float safe;
+	if (clampIt) *(DWORD*)&safe = 0x3F800000;   // out of (0.1,10) [or neg/NaN/inf] -> neutral 1.0
+	else         *(DWORD*)&safe = bits;          // in range -> pass through unchanged
+	// [BLITZPROBE2] read-only DECISIVE capture on the OUT-OF-RANGE (crashing) rosace. Probe-1 PROVED the
+	// descriptor/gesture-Set/banks are all correct (id41=17, str44=1.0, set 0, banks=0x7F) and that the garbage
+	// coef is COMPUTED by sub_100E73C0 from the rosace MOVEMENT-DIRECTION ANGLE at cGestureMix+0x6E0 (config
+	// floats are sane), where +0x6E0 is copied from masterPlayer+0x71C. cGestureMix is embedded at
+	// AI_GestureMixManager+0x8 and masterPlayer at AI_GestureMixManager+0x4, so masterPlayer = *(THIS-4)
+	// (verified at the sub_101F0420 call site: lea edi,[esi+8]; fld [eax+71Ch]). Capture the angle/speed (the
+	// gesturemix copy AND the player source), the path/case selectors (byte+0xDA0 picks the directional path
+	// that reads the angle; byte+0x818==2 is the AI_EntityHuman::Replica case that (re)computes +0x718 and the
+	// +0x700 direction vector), the computed direction vector (+0x700) and orientation flags (+0x750).
+	// DECODE: f6E0/ang71C garbage => the angle is bad (the proven root). sw818!=2 => the Replica rosace-update
+	// case never ran for this entity (fields stale/uninit) -> server lever = drive that locomotion sub-state.
+	// sw818==2 but dir700/ang71C garbage => the case ran but the movement/orientation inputs are garbage ->
+	// server lever = fix the movement/orientation replica. selDA0 will read !=2 (we are on the crash path).
+	if (g_blitzprobe && clampIt)
+	{
+		_fxsave(g_blitz_fxbuf);
+		DWORD f6E0 = *(DWORD*)((char*)THIS + 0x6E0);   // gesturemix angle copy (the sub_100E73C0 input)
+		DWORD f6E4 = *(DWORD*)((char*)THIS + 0x6E4);   // gesturemix speed copy
+		DWORD desc = *(DWORD*)((char*)THIS + 0x5CC);
+		DWORD id41 = (desc >= 0x10000 && desc < 0x80000000) ? *(unsigned char*)(desc + 41) : 0xFF;
+		DWORD mp   = *(DWORD*)((char*)THIS - 4);        // AI_GestureMixManager = THIS-8; masterPlayer @ +4
+		DWORD selDA0 = 0xFFFFFFFF, sw818 = 0xFFFFFFFF, ang71C = 0, spd718 = 0, d0 = 0, d1 = 0, d2 = 0, fl750 = 0;
+		if (mp >= 0x10000 && mp < 0x80000000)
+		{
+			selDA0 = *(unsigned char*)(mp + 0xDA0);    // path selector (!=2 => directional/crash path)
+			sw818  = *(unsigned char*)(mp + 0x818);    // Replica switch (==2 => rosace-update case ran)
+			ang71C = *(DWORD*)(mp + 0x71C);            // source angle (should == f6E0)
+			spd718 = *(DWORD*)(mp + 0x718);            // source speed (should == f6E4)
+			d0 = *(DWORD*)(mp + 0x700); d1 = *(DWORD*)(mp + 0x704); d2 = *(DWORD*)(mp + 0x708);  // direction vec
+			fl750 = *(DWORD*)(mp + 0x750);            // orientation flags
+		}
+		sprintf(buffer, "[BLITZPROBE2] coefBits=0x%08X f6E0=0x%08X f6E4=0x%08X id41=%u mp=0x%08X selDA0=%u sw818=%u ang71C=0x%08X spd718=0x%08X dir700=(0x%08X,0x%08X,0x%08X) flags750=0x%08X this=0x%08X\n",
+			bits, f6E0, f6E4, id41, mp, selDA0, sw818, ang71C, spd718, d0, d1, d2, fl750, (DWORD)THIS);
+		Log(buffer);
+		_fxrstor(g_blitz_fxbuf);
+	}
+	if ((g_blitzclamp && clampIt) || g_blitz_n < 24)
+	{
+		if (g_blitz_n < 1000) g_blitz_n++;
+		_fxsave(g_blitz_fxbuf);
+		sprintf(buffer, "[BLITZFIX] StretchRosace coef=%f (bits=0x%08X) %s clamp=%d -> %f  this=0x%08X\n",
+			a2, bits, clampIt ? "OUT-OF-RANGE" : "ok", g_blitzclamp, safe, (DWORD)THIS);
+		Log(buffer);
+		_fxrstor(g_blitz_fxbuf);
+	}
+	// clamp only if _blitzfix_ is armed; probe-only run passes the original (crashing) coef through (read-only)
+	return org_StretchRosace_blitzfix(THIS, EDX, g_blitzclamp ? safe : a2);
+}
+
 // [IRONF] iron-sight BLEND factor diag (installed with "_moodorder_"): hook AI_CameraBase::GetIronSightFactor
 // @0x101B0760. Returns *(this[11]+212): 1.0(0x3F800000)=full iron-sight position, 0.0=full over-the-shoulder.
 // If this stays 0 while aiming, the camera POSITION never blends to the iron eye-offset -> "sights view but

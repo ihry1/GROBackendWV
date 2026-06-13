@@ -97,8 +97,10 @@ namespace QuazalWV
             Helper.WriteU8(m, skinId);
             Helper.WriteU8(m, nbModifiers);
             Helper.WriteU16(m, bitmask);
+            // BE like the WriteU32LE(faceId) header above (the client reads this payload big-endian);
+            // WriteFloat was little-endian -> byte-swapped modifiers. See ClassInfo_Ability for the proven case.
             foreach (float modifier in bodyModifiers)
-                Helper.WriteFloat(m, modifier);
+                Helper.WriteFloatLE(m, modifier);
             return m.ToArray();//56B
         }
     }

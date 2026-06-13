@@ -351,6 +351,19 @@ void DetourMain()
 	}
 	if(FileExists("_customizediag_"))	//drop an empty "_customizediag_" file to log the weapon-customize store-functor lookups + GetAttachCompType compat results (splits "no attachments offered" into functor-empty vs compat-reject).
 		DetourCustomizeDiag();
+	// [BLITZFIX]/[BLITZPROBE] Blitz deploy: drop "_blitzfix_" to CLAMP the out-of-range stretch coef so Blitz
+	// deploys instead of asserting; drop "_blitzprobe_" to LOG the decisive deploy/bank-load capture (the
+	// resolved rosace descriptor id/stretch + active gesture-Set + which locomotion banks 100-160 are on the
+	// body GAO) on the crashing rosace. Run BOTH together (clamp so it doesn't crash + capture the data).
+	// Either flag installs the hook; both absent => native (crashing) behavior. Delete the file(s) to revert.
+	g_blitzclamp = FileExists("_blitzfix_") ? 1 : 0;
+	g_blitzprobe = FileExists("_blitzprobe_") ? 1 : 0;
+	if (g_blitzclamp || g_blitzprobe)
+	{
+		org_StretchRosace_blitzfix = (const char*(__fastcall*)(void*,void*,float)) DetourFunction((PBYTE)(baseAddressAI + 0xEB1E0), (PBYTE)StretchRosace_blitzfix);
+		sprintf(buffer, "[BLITZFIX] Hooked cGestureMix::StretchRosace @+0xEB1E0 (clamp=%d probe=%d)\n", g_blitzclamp, g_blitzprobe);
+		Log(buffer);
+	}
 	if(FileExists("_rcdiag_"))		//drop an empty "_rcdiag_" file to log the LOCAL pawn's ReplicationCallback (RC index 12 = m_Mood->UpdateMood). READ-ONLY; confirms whether a server 0x98 reaches RC(12).
 	{
 		org_RC_diag = (char(__fastcall*)(void*, void*, int)) DetourFunction((PBYTE)(baseAddressAI + 0xCB24C), (PBYTE)RC_diag);

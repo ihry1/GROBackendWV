@@ -71,7 +71,9 @@ namespace QuazalWV
             Helper.WriteFloatLE(m, criticalMitigation);
             Helper.WriteU8(m, nbModifiers);
             Helper.WriteU16(m, bitmask);
-            foreach (float mod in propertyList) Helper.WriteFloat(m, mod);
+            // BE like the bonusHealth/toughness scalars above (the client reads this payload big-endian);
+            // WriteFloat was little-endian -> byte-swapped modifiers. See ClassInfo_Ability for the proven case.
+            foreach (float mod in propertyList) Helper.WriteFloatLE(m, mod);
             return m.ToArray();//73B
         }
     }

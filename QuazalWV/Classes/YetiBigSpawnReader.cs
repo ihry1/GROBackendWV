@@ -33,7 +33,11 @@ namespace QuazalWV
     public static class YetiBigSpawnReader
     {
         private const uint MAGIC = 0x47494259;
-        private const ushort TYPE_GAO = 0x000D;
+        private const ushort TYPE_GAO = 0x000D;   // 'gao' game object — the SpawnZones on the 4 PvP maps
+        private const ushort TYPE_WAY = 0x000E;   // 'Way' sibling — defensive fallback if a map has no 0x0D zones
+
+        // random spawn selection among a team's points (replaces "always the first")
+        private static readonly Random _rng = new Random();
 
         private struct Entry
         {
@@ -65,7 +69,13 @@ namespace QuazalWV
             public float X, Y, Z;
         }
 
-        /// <summary>Try to get a spawn position for the given map and team. Falls back gracefully.</summary>
+        /// <summary>
+        /// Try to get a spawn position for the given map and team. Picks a RANDOM point among the
+        /// player's team's spawn zones (so players don't all stack on one fixed point); if that team
+        /// has no zones (e.g. a map with only team-1 zones, or team 0/unknown) it falls back to a random
+        /// point among ALL zones. Returns false only when the map has no spawn zones at all (the 8
+        /// non-PvP maps) — the caller then keeps its existing fallback position.
+        /// </summary>
         public static bool TryGetSpawn(uint mapKey, int team, out float x, out float y, out float z)
         {
             x = y = z = 0f;
@@ -74,10 +84,13 @@ namespace QuazalWV
                 List<Spawn> spawns = GetSpawns(mapKey);
                 if (spawns == null || spawns.Count == 0)
                     return false;
-                // prefer requested team, else any
-                Spawn s = spawns.FirstOrDefault(p => p.Team == team);
-                if (s.Name == null)
-                    s = spawns[0];
+                // prefer the player's team's points; if that team has none, use any point
+                List<Spawn> pool = spawns.Where(p => p.Team == team).ToList();
+                if (pool.Count == 0)
+                    pool = spawns;
+                Spawn s;
+                lock (_rng)
+                    s = pool[_rng.Next(pool.Count)];   // random among the team's points (was: always the first)
                 x = s.X; y = s.Y; z = s.Z;
                 return true;
             }
@@ -115,30 +128,40 @@ namespace QuazalWV
                     return result;
                 }
                 string scope = "/" + mapName + "/";
-                // 2) find SpawnZone gao objects scoped to that map, read their transforms
+                // 2) find SpawnZone objects scoped to that map, read their transforms.
+                //    type 0x0D ('gao') carries the spawns on the 4 PvP maps; if a map has none, try the
+                //    0x0E ('Way') siblings as a defensive fallback. (The 8 non-PvP maps have neither —
+                //    verified against the shipped Yeti.big — so result stays empty => caller falls back.)
                 using (FileStream fs = File.OpenRead(_loadedPath))
                 {
-                    foreach (Entry e in _entries)
-                    {
-                        if (e.Type != TYPE_GAO || e.Name == null) continue;
-                        if (!e.Name.StartsWith("SpawnZone", StringComparison.OrdinalIgnoreCase)) continue;
-                        if (FolderPath(e.Folder).IndexOf(scope, StringComparison.OrdinalIgnoreCase) < 0) continue;
-                        float px, py, pz;
-                        if (TryReadGaoPosition(fs, e, out px, out py, out pz))
-                        {
-                            result.Add(new Spawn
-                            {
-                                Name = e.Name,
-                                Team = TeamFromName(e.Name),
-                                X = px, Y = py, Z = pz
-                            });
-                        }
-                    }
+                    ScanSpawnZones(fs, scope, TYPE_GAO, result);
+                    if (result.Count == 0)
+                        ScanSpawnZones(fs, scope, TYPE_WAY, result);
                 }
-                Log.WriteLine(1, "[YetiBig] map '" + mapName + "' (key 0x" + mapKey.ToString("X8") + "): "
-                                 + result.Count + " spawn points");
+                if (result.Count == 0)
+                    Log.WriteLine(1, "[YetiBig] map '" + mapName + "' (key 0x" + mapKey.ToString("X8")
+                                     + "): NO SpawnZones in Yeti.big (0x0D/0x0E) - players use fallback position");
+                else
+                    Log.WriteLine(1, "[YetiBig] map '" + mapName + "' (key 0x" + mapKey.ToString("X8") + "): "
+                                     + result.Count + " spawn points (T1=" + result.Count(p => p.Team == 1)
+                                     + " T2=" + result.Count(p => p.Team == 2)
+                                     + " other=" + result.Count(p => p.Team == 0) + ")");
                 _spawnCache[mapKey] = result;
                 return result;
+            }
+        }
+
+        /// <summary>Collect SpawnZone-named objects of the given type, scoped to the map, with a valid transform.</summary>
+        private static void ScanSpawnZones(FileStream fs, string scope, ushort type, List<Spawn> result)
+        {
+            foreach (Entry e in _entries)
+            {
+                if (e.Type != type || e.Name == null) continue;
+                if (!e.Name.StartsWith("SpawnZone", StringComparison.OrdinalIgnoreCase)) continue;
+                if (FolderPath(e.Folder).IndexOf(scope, StringComparison.OrdinalIgnoreCase) < 0) continue;
+                float px, py, pz;
+                if (TryReadGaoPosition(fs, e, out px, out py, out pz))
+                    result.Add(new Spawn { Name = e.Name, Team = TeamFromName(e.Name), X = px, Y = py, Z = pz });
             }
         }
 

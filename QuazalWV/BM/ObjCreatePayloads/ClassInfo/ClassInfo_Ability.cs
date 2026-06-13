@@ -507,17 +507,25 @@ namespace QuazalWV
             Helper.WriteU8(m, upgradeSlot2);
             Helper.WriteU8(m, upgradeSlot3);
 
-            //base modifiers list
+            // base + specific modifier lists.
+            // ENDIANNESS: the client deserializes these modifier floats BIG-ENDIAN (same as energyPool/
+            // rechargeRate above, which use WriteFloatLE). Helper.WriteFloatLE writes the reversed/big-endian
+            // byte order; Helper.WriteFloat writes raw little-endian. Using WriteFloat here byte-SWAPPED every
+            // modifier on the client: e.g. Blitz RushStretch_F=1.0 (0x3F800000) arrived as 0x0000803F, a
+            // denormal ~4.6e-41 -> AI_EntityPlayer::GetMobility returned ~0 -> the rosace stretch coef collapsed
+            // to a denormal -> cGestureMix::StretchRosace assert/crash on Blitz deploy. (Runtime-proven via the
+            // GRO_Hook StretchRosace probe; the arithmetic closes exactly.) WriteFloatLE delivers the real
+            // values, fixing the Blitz crash at the source and giving every ability its correct modifiers.
             Helper.WriteU8(m, nbBaseModifiers);
             Helper.WriteU8(m, baseModBitmask);
             foreach (float modifier in baseModifiers)
-                Helper.WriteFloat(m, modifier);
+                Helper.WriteFloatLE(m, modifier);
 
             //specific modifiers list
             Helper.WriteU8(m, nbSpecificModifiers);
             Helper.WriteU16(m, specificModBitmask);
             foreach (float modifier in specificModifiers)
-                Helper.WriteFloat(m, modifier);
+                Helper.WriteFloatLE(m, modifier);
             return m.ToArray();//101B (Blitz)
         }
     }

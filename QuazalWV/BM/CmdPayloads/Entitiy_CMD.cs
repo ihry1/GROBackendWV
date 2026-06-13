@@ -103,15 +103,6 @@ namespace QuazalWV
                             (ushort)DO_RMCRequestMessage.DOC_METHOD.SetPlayerParameters,
                             client.settings.toBuffer()
                             ));
-                        // Resolve a real spawn point for the session's map from Yeti.big at runtime
-                        // (falls back to Global.spawn* if the archive/map/zone isn't found).
-                        // Team 1 matches OCP_PlayerEntity.teamID; MSG_ID_Net_Obj_Create reads Global.spawn*.
-                        float _sx, _sy, _sz;
-                        if (YetiBigSpawnReader.TryGetSpawn(SessionInfosParameter.defaultMapKey, 1, out _sx, out _sy, out _sz))
-                        {
-                            Global.spawnX = _sx; Global.spawnY = _sy; Global.spawnZ = _sz;
-                            Log.WriteLine(1, "[DS] Spawning player at (" + _sx + ", " + _sy + ", " + _sz + ") from Yeti.big");
-                        }
                         // Spawn the player with the same class/loadout chosen in the lobby. The DS reads the
                         // backend DB read-only, resolving the selected class's bag (4/5/6) plus kit defaults.
                         OCP_PlayerEntity _pe = new OCP_PlayerEntity(2);
@@ -131,6 +122,19 @@ namespace QuazalWV
                             " armorInv=" + _loadout.ArmorInventoryID + " helmetKey=0x" + _loadout.HelmetKey.ToString("X8") +
                             " abilityType=" + _loadout.AbilityType + " passiveType=" + _loadout.PassiveAbilityType +
                             " body=" + _loadout.FaceID + "/" + _loadout.SkinID + " source=" + _loadout.Source);
+                        // Resolve a real spawn point for the session's map from Yeti.big at runtime, picking a
+                        // RANDOM zone for the player's team (was: always team-1's first point). Uses the entity's
+                        // teamID so it follows team assignment; MSG_ID_Net_Obj_Create reads Global.spawn* below.
+                        // Falls back to the current Global.spawn* if the map has no spawn zones (the 8 non-PvP maps).
+                        float _sx, _sy, _sz;
+                        if (YetiBigSpawnReader.TryGetSpawn(SessionInfosParameter.defaultMapKey, _pe.teamID, out _sx, out _sy, out _sz))
+                        {
+                            Global.spawnX = _sx; Global.spawnY = _sy; Global.spawnZ = _sz;
+                            Log.WriteLine(1, "[DS] Spawning team " + _pe.teamID + " player at (" + _sx + ", " + _sy + ", " + _sz + ") from Yeti.big");
+                        }
+                        else
+                            Log.WriteLine(1, "[DS] no Yeti.big spawn for map 0x" + SessionInfosParameter.defaultMapKey.ToString("X8")
+                                + " team " + _pe.teamID + " - using fallback (" + Global.spawnX + ", " + Global.spawnY + ", " + Global.spawnZ + ")");
                         msgs.Add(DO_RMCRequestMessage.Create(client.callCounterDO_RMC++,
                             0x1006,
                             new DupObj(DupObjClass.Station, 1),
