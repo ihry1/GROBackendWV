@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.IO;
 using System.Collections.Generic;
 using System.ComponentModel;
@@ -14,6 +14,15 @@ namespace GRODedicatedServerWV
 {
     public partial class Form1 : Form
     {
+        // Map name -> bigfile key (hex string)
+        private readonly Dictionary<string, string> mapKeyDictionary = new Dictionary<string, string>()
+        {
+            { "Metro", "0D80B43C" },
+            { "Chertanovo", "DE139C36" },
+            { "Oil Rig", "4D13CD5C" },
+            { "Rooftop", "FD700758" }
+        };
+
         public Form1()
         {
             InitializeComponent();
@@ -32,6 +41,23 @@ namespace GRODedicatedServerWV
             }
             catch { DBHelper.Init(); }
             toolStripComboBox1.SelectedIndex = 0;
+
+            // populate map combo box
+            mapComboBox.Items.Clear();
+            foreach (var kv in mapKeyDictionary)
+                mapComboBox.Items.Add(kv.Key);
+            // default to Oil Rig if present
+            int oilIndex = mapComboBox.Items.IndexOf("Oil Rig");
+            if (oilIndex >= 0)
+            {
+                mapComboBox.SelectedIndex = oilIndex;
+                toolStripTextBox2.Text = mapKeyDictionary["Oil Rig"];
+            }
+            else if (mapComboBox.Items.Count > 0)
+            {
+                mapComboBox.SelectedIndex = 0;
+                toolStripTextBox2.Text = mapKeyDictionary[mapComboBox.Items[0].ToString()];
+            }
         }
 
         // Auto-start overload: launching with -autostart (or /autostart) on the command line
@@ -52,12 +78,35 @@ namespace GRODedicatedServerWV
 
         private void toolStripButton1_Click(object sender, EventArgs e)
         {
-            uint mapKey = Convert.ToUInt32(toolStripTextBox2.Text, 16);
+            string mapKeyHex = null;
+
+            if (mapComboBox.SelectedIndex >= 0 && mapComboBox.SelectedItem != null)
+            {
+                string selectedMap = mapComboBox.SelectedItem.ToString();
+                mapKeyDictionary.TryGetValue(selectedMap, out mapKeyHex);
+            }
+
+            // fallback to manual textbox if combo didn't provide a key
+            if (string.IsNullOrEmpty(mapKeyHex))
+                mapKeyHex = toolStripTextBox2.Text.Trim();
+
+            uint mapKey;
+            try
+            {
+                mapKey = Convert.ToUInt32(mapKeyHex, 16);
+            }
+            catch
+            {
+                MessageBox.Show("Invalid map key: " + mapKeyHex, "Error", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
+
             SessionInfosParameter.defaultMapKey = mapKey;
             Log.WriteLine(1, "Using mapkey = 0x" + mapKey.ToString("X8"), Color.Red);
             timer1.Enabled = true;
             UDPDedicatedServer.Start();
             toolStripTextBox2.Enabled =
+            mapComboBox.Enabled =
             toolStripButton1.Enabled = false;
             toolStripButton2.Enabled = true;
 
@@ -68,6 +117,7 @@ namespace GRODedicatedServerWV
             timer1.Enabled = false;
             UDPDedicatedServer.Stop();
             toolStripTextBox2.Enabled =
+            mapComboBox.Enabled =
             toolStripButton1.Enabled = true;
             toolStripButton2.Enabled = false;
         }
@@ -104,6 +154,19 @@ namespace GRODedicatedServerWV
                 case 3:
                     Log.MinPriority = 10;
                     break;
+            }
+        }
+
+        private void mapComboBox_SelectedIndexChanged(object sender, EventArgs e)
+        {
+            if (mapComboBox.SelectedIndex >= 0 && mapComboBox.SelectedItem != null)
+            {
+                string selectedMap = mapComboBox.SelectedItem.ToString();
+                if (mapKeyDictionary.TryGetValue(selectedMap, out string mapKeyHex))
+                {
+                    toolStripTextBox2.Text = mapKeyHex;
+                    Log.WriteLine(1, "Map selected: " + selectedMap + " (0x" + mapKeyHex + ")", Color.Blue);
+                }
             }
         }
 
