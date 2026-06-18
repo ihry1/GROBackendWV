@@ -12,6 +12,7 @@ namespace QuazalWV
         public static byte[] HandleMessage(ClientInfo client, byte[] data, byte sessionID)
         {
             Log.WriteLine(2, "[DO] Handling DO_JoinRequestMessage...");
+            Global.EnsureStation(client);   // ensure this client's distinct station exists before the join handshake uses it
             SendConnectionRequest(client, sessionID);
             List<byte[]> msgs = new List<byte[]>();
             InitSession(client);
@@ -30,7 +31,9 @@ namespace QuazalWV
 
         private static void InitSession(ClientInfo client)
         {
-            DO_Session.ResetObjects();
+            // 2-player: initialize the SHARED session ONCE. Previously this reset on every join, so the
+            // second client wiped the first client's station out of the session ("last joiner wins").
+            DO_Session.EnsureInitialized();
         }
 
         private static void SendConnectionRequest(ClientInfo client, byte sessionID)
@@ -54,7 +57,7 @@ namespace QuazalWV
             MemoryStream m = new MemoryStream();
             Helper.WriteU32(m, 8);
             Helper.WriteU32(m, new DupObj(DupObjClass.Station, 1));
-            Helper.WriteU32(m, new DupObj(DupObjClass.Station, 2));
+            Helper.WriteU32(m, new DupObj(DupObjClass.Station, client.stationID));
             DO.MakeAndSend(client, qp, m.ToArray());
         }
     }

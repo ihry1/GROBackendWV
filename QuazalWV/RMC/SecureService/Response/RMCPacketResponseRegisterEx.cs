@@ -14,7 +14,11 @@ namespace QuazalWV
         public string clientUrl;
         public RMCPacketResponseRegisterEx(uint pid)
         {
-            clientUrl = "prudps:/address=" + Global.serverBindAddress + ";port=3074;CID=1;PID=" + pid + ";sid=1;RVCID=4660;stream=3;type=2";
+            // RVCID (RendezVous Connection ID) MUST equal the player's PID. It was hardcoded 4660, which
+            // only worked because the sole test account's PID was 4660; any other account (e.g. wv2 pid
+            // 4661) got PID=<real> but RVCID=4660 -> identity mismatch -> the client accepts the account
+            // but never its own character data ("Retrieving Character Data" hangs forever). Derive from pid.
+            clientUrl = "prudps:/address=" + Global.serverBindAddress + ";port=3074;CID=1;PID=" + pid + ";sid=1;RVCID=" + pid + ";stream=3;type=2";
         }
 
         public override byte[] ToBuffer()

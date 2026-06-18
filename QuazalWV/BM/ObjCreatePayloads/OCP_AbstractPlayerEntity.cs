@@ -31,6 +31,7 @@ namespace QuazalWV
         public uint desiredWeaponGrenadeInventoryId = 0;
         public uint helmetInventoryId = 0;
         public uint armorInventoryId = 0;
+        public string personaName = "";   // m_PersonaName (kill-feed names + name tags); populate from personas.name
 
         public OCP_AbstractPlayerEntity(uint h)
         {
@@ -63,7 +64,11 @@ namespace QuazalWV
             Helper.WriteU8(m, classID);  //  9 m_Class                     u8
             Helper.WriteU16LE(m, 0);     // 10 m_ClassLevel                u16 BE
             Helper.WriteU32LE(m, 0);     // 11 m_PortraitId                u32 BE
-            Helper.WriteU32(m, 0);       // 12 m_PersonaName length        u32 LE (=0 -> empty)
+            // 12 m_PersonaName = RDC_String: [u32 LE length][ASCII chars] (no null term; reader @0x100d54d0). Empty
+            // (len 0) left the in-match abstract nameless -> blank kill-feed names + name tags. Now from personas.name.
+            byte[] _nm = System.Text.Encoding.ASCII.GetBytes(personaName ?? "");
+            Helper.WriteU32(m, (uint)_nm.Length);   // u32 LE length (Helper.WriteU32 = little-endian, matches the reader)
+            m.Write(_nm, 0, _nm.Length);
 
             // ================= Block2 (serialStruct2) : empty =================
             Helper.WriteU8(m, 0);        // size  = 0

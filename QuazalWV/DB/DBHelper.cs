@@ -39,6 +39,23 @@ namespace QuazalWV
     {
         public static SQLiteConnection connection = new SQLiteConnection();
 
+        // 2-player: the backend runs MANY listener threads (UDP/RDV/OnlineConfig/Auth + a thread PER TCP
+        // client) that ALL share this one static SQLiteConnection. A connection allows only ONE active
+        // reader at a time, so two clients querying at once (e.g. both loading character data) collide ->
+        // SQLiteException -> swallowed by the packet loop -> response lost -> client hangs forever (the wv2
+        // "Retrieving Character Data" hang). Serialize ALL access on dbLock. lock is re-entrant, so a write
+        // helper that internally calls GetQueryResults on the same thread is safe.
+        public static readonly object dbLock = new object();
+
+        // Locked INSERT/UPDATE/CREATE. Every write goes through here (or a lock(dbLock) block) so it can
+        // never race a reader on the shared connection.
+        public static int ExecNonQuery(string sql)
+        {
+            lock (dbLock)
+                using (SQLiteCommand cmd = new SQLiteCommand(sql, connection))
+                    return cmd.ExecuteNonQuery();
+        }
+
         // connStr defaults to the process's own database.sqlite (the backend). The dedicated server
         // passes the BACKEND's db path in read-only mode so it can look up loadouts/weapon components
         // at spawn (its own db is 0 bytes). Close-if-open lets a caller retry with a different source.
@@ -52,20 +69,23 @@ namespace QuazalWV
 
         public static List<List<string>> GetQueryResults(string query)
         {
-            List<List<string>> result = new List<List<string>>();
-            SQLiteCommand command = new SQLiteCommand(query, connection);
-            SQLiteDataReader reader = command.ExecuteReader();
-            while (reader.Read())
+            lock (dbLock)
             {
-                List<string> entry = new List<string>();
-                for (int i = 0; i < reader.FieldCount; i++)
-                    entry.Add(reader[i].ToString());
-                result.Add(entry);
+                List<List<string>> result = new List<List<string>>();
+                SQLiteCommand command = new SQLiteCommand(query, connection);
+                SQLiteDataReader reader = command.ExecuteReader();
+                while (reader.Read())
+                {
+                    List<string> entry = new List<string>();
+                    for (int i = 0; i < reader.FieldCount; i++)
+                        entry.Add(reader[i].ToString());
+                    result.Add(entry);
+                }
+                reader.Close();
+                reader.Dispose();
+                command.Dispose();
+                return result;
             }
-            reader.Close();
-            reader.Dispose();
-            command.Dispose();
-            return result;
         }
 
         // Defensive numeric parse for DB string cells (each is reader[i].ToString()). The retail RMC
@@ -362,7 +382,7 @@ namespace QuazalWV
             if (bagId >= 0) return bagId;
             try
             {
-                new SQLiteCommand("INSERT INTO inventorybags (pid, bagtype) VALUES (" + pid + "," + bagType + ")", connection).ExecuteNonQuery();
+                ExecNonQuery("INSERT INTO inventorybags (pid, bagtype) VALUES (" + pid + "," + bagType + ")");
             }
             catch { }
             return GetBagId(pid, bagType);
@@ -378,7 +398,7 @@ namespace QuazalWV
         // Write the inventoryid into (bag, slot). Only touches an existing row (safe no-op otherwise).
         public static void SetSlotInventoryId(int bagId, uint slotId, uint inventoryId)
         {
-            try { new SQLiteCommand("UPDATE inventorybagslots SET inventoryid=" + inventoryId + " WHERE bagid=" + bagId + " AND slotid=" + slotId, connection).ExecuteNonQuery(); }
+            try { ExecNonQuery("UPDATE inventorybagslots SET inventoryid=" + inventoryId + " WHERE bagid=" + bagId + " AND slotid=" + slotId); }
             catch { }
         }
 
@@ -389,9 +409,9 @@ namespace QuazalWV
             {
                 List<List<string>> row = GetQueryResults("SELECT id FROM inventorybagslots WHERE bagid=" + bagId + " AND slotid=" + slotId);
                 if (row.Count > 0)
-                    new SQLiteCommand("UPDATE inventorybagslots SET inventoryid=" + inventoryId + " WHERE bagid=" + bagId + " AND slotid=" + slotId, connection).ExecuteNonQuery();
+                    ExecNonQuery("UPDATE inventorybagslots SET inventoryid=" + inventoryId + " WHERE bagid=" + bagId + " AND slotid=" + slotId);
                 else
-                    new SQLiteCommand("INSERT INTO inventorybagslots (bagid, inventoryid, slotid, durability) VALUES (" + bagId + "," + inventoryId + "," + slotId + ",100)", connection).ExecuteNonQuery();
+                    ExecNonQuery("INSERT INTO inventorybagslots (bagid, inventoryid, slotid, durability) VALUES (" + bagId + "," + inventoryId + "," + slotId + ",100)");
             }
             catch { }
         }
@@ -399,14 +419,14 @@ namespace QuazalWV
         // As above, also setting durability.
         public static void SetSlotInventoryId(int bagId, uint slotId, uint inventoryId, uint durability)
         {
-            try { new SQLiteCommand("UPDATE inventorybagslots SET inventoryid=" + inventoryId + ", durability=" + durability + " WHERE bagid=" + bagId + " AND slotid=" + slotId, connection).ExecuteNonQuery(); }
+            try { ExecNonQuery("UPDATE inventorybagslots SET inventoryid=" + inventoryId + ", durability=" + durability + " WHERE bagid=" + bagId + " AND slotid=" + slotId); }
             catch { }
         }
 
         // Decrement an equipped item's durability (clamped at 0), located by inventoryid within the persona's bags.
         public static void ReduceSlotDurabilityByInventoryId(uint pid, uint inventoryId, uint amount)
         {
-            try { new SQLiteCommand("UPDATE inventorybagslots SET durability = MAX(0, durability - " + amount + ") WHERE inventoryid=" + inventoryId + " AND bagid IN (SELECT id FROM inventorybags WHERE pid=" + pid + ")", connection).ExecuteNonQuery(); }
+            try { ExecNonQuery("UPDATE inventorybagslots SET durability = MAX(0, durability - " + amount + ") WHERE inventoryid=" + inventoryId + " AND bagid IN (SELECT id FROM inventorybags WHERE pid=" + pid + ")"); }
             catch { }
         }
 
@@ -471,13 +491,13 @@ namespace QuazalWV
 
         public static void SetSelectedClass(uint pid, uint classId)
         {
-            try { new SQLiteCommand("UPDATE personas SET lastusedcid=" + classId + " WHERE pid=" + pid, connection).ExecuteNonQuery(); }
+            try { ExecNonQuery("UPDATE personas SET lastusedcid=" + classId + " WHERE pid=" + pid); }
             catch { }
         }
 
         public static void SetCharacterLoadoutKit(uint pid, uint classId, uint kitId)
         {
-            try { new SQLiteCommand("UPDATE characters SET kit=" + kitId + " WHERE pid=" + pid + " AND class=" + classId, connection).ExecuteNonQuery(); }
+            try { ExecNonQuery("UPDATE characters SET kit=" + kitId + " WHERE pid=" + pid + " AND class=" + classId); }
             catch { }
         }
 
@@ -503,6 +523,55 @@ namespace QuazalWV
         {
             List<List<string>> r = GetQueryResults("SELECT iid FROM passiveabilities WHERE classID=" + classId + " ORDER BY iid LIMIT 1");
             return r.Count > 0 ? SafeU32(r[0][0]) : 0;
+        }
+
+        // Per-shot BASE damage for a weapon, keyed by its mapKey (== useritems.itemid == templateitems.iid ==
+        // SpawnLoadoutInfo.MainWeaponID == OCP_PlayerEntity.mainWeaponID). Source: the weapon's synthetic stat
+        // component (tempcomponentlists.value in 700000-799999, the extracted retail per-weapon stat list) ->
+        // skillmodifiers proptype 2 (damage) modtype 2; each weapon has exactly ONE such row (verified). This is the
+        // in-DB RETAIL base damage vs 100 HP (e.g. M27=30.6, F2000=38.3, Mk17=47.7, Mk5=40.2, M249=32.0, P250=24.1,
+        // M24=78.0 -> 2-5 hits to kill). Returns 0 on any miss (grenade/throwable/unknown) so the caller falls back
+        // to the flat Global.realHitDamage. The hit cmd carries no damage -- retail's DS computed it from the weapon
+        // (AI_EntityPlayer::GetDamageData), which is the role the emulated DS plays. Range falloff / headshot-crit /
+        // armor mitigation are refinements layered on later (see gro-combat-wire-protocol).
+        public static float GetWeaponDamage(uint weaponMapKey)
+        {
+            if (weaponMapKey == 0) return 0f;
+            try
+            {
+                List<List<string>> r = GetQueryResults(
+                    "SELECT s.methodval FROM tempcomponentlists t JOIN skillmodifiers s ON s.listid = t.value " +
+                    "WHERE t.key = " + weaponMapKey + " AND t.value >= 700000 AND t.value < 800000 " +
+                    "AND s.proptype = 2 AND s.modtype = 2 LIMIT 1");
+                if (r.Count > 0)
+                {
+                    float dmg;
+                    if (float.TryParse(r[0][0], System.Globalization.NumberStyles.Float,
+                                       System.Globalization.CultureInfo.InvariantCulture, out dmg) && dmg > 0f)
+                        return dmg;
+                }
+            }
+            catch { }
+            return 0f;
+        }
+
+        // The persona display NAME (personas.name) for the in-match abstract m_PersonaName -> kill-feed names + name tags.
+        public static string GetPersonaName(uint pid)
+        {
+            try { List<List<string>> r = GetQueryResults("SELECT name FROM personas WHERE pid=" + pid + " LIMIT 1"); if (r.Count > 0) return r[0][0] ?? ""; }
+            catch { }
+            return "";
+        }
+
+        // The client-side weaponID (weapons.weaponID, small 1-66) for a weapon mapKey -- what AI_EntityPlayer::GetWeaponByID
+        // matches to select the kill-feed ICON. Passing the mapKey instead matched nothing -> the feed fell back to the
+        // headshot icon. 0 on miss.
+        public static uint GetWeaponWeaponID(uint weaponMapKey)
+        {
+            if (weaponMapKey == 0) return 0;
+            try { List<List<string>> r = GetQueryResults("SELECT weaponID FROM weapons WHERE mapKey=" + weaponMapKey + " LIMIT 1"); if (r.Count > 0) return SafeU32(r[0][0]); }
+            catch { }
+            return 0;
         }
 
         public static uint GetTemplateItemType(uint itemId)
@@ -670,7 +739,7 @@ namespace QuazalWV
         private static void EnsureCustomCompTable()
         {
             if (_customCompTableReady) return;
-            try { new SQLiteCommand("CREATE TABLE IF NOT EXISTS weaponcustomcomponents (pid INTEGER, inventoryid INTEGER, components TEXT, PRIMARY KEY(pid, inventoryid))", connection).ExecuteNonQuery(); }
+            try { ExecNonQuery("CREATE TABLE IF NOT EXISTS weaponcustomcomponents (pid INTEGER, inventoryid INTEGER, components TEXT, PRIMARY KEY(pid, inventoryid))"); }
             catch { }
             _customCompTableReady = true;
         }
@@ -725,7 +794,7 @@ namespace QuazalWV
         {
             EnsureCustomCompTable();
             string csv = string.Join(",", components);
-            try { new SQLiteCommand("INSERT OR REPLACE INTO weaponcustomcomponents (pid,inventoryid,components) VALUES (" + pid + "," + inventoryId + ",'" + csv + "')", connection).ExecuteNonQuery(); }
+            try { ExecNonQuery("INSERT OR REPLACE INTO weaponcustomcomponents (pid,inventoryid,components) VALUES (" + pid + "," + inventoryId + ",'" + csv + "')"); }
             catch { }
         }
 
@@ -878,6 +947,153 @@ namespace QuazalWV
                 }
                 result.Add(pat);
             }
+            return result;
+        }
+
+        // The 12 type-21 "CombatProperty" modifiers for a player's EQUIPPED armor, resolved from their
+        // loadout (inventory). The armor loadout slot holds an armortier (templateitems type 10); the tier's
+        // modefierlistid -> skillmodifiers rows of modtype 21 are the combat properties, each placed at
+        // slot[proptype] -- the GetCombatProperty(index) the client reads off AI_EntityPlayer+0x4B8. The values
+        // are additive/fractional with a NEUTRAL identity of 0.0, so any index lacking a modifier stays 0.0.
+        // Only the armor TIER carries modtype-21 in this catalog (cross-checked: armoritems lists are modtype-2,
+        // armorinserts lists are modtype-12 -- neither holds a modtype-21 row), so the equipped tier alone is
+        // the complete source. Returns 12 zeros on any miss (no/garbage tier, the starter tier-1 which has no
+        // combat bonus by design, pid==0, or a DB hiccup) -- the safe neutral the client expects. methodval is
+        // TEXT and is parsed with InvariantCulture so a non-"." locale can't corrupt it. See ClassInfo_Armor /
+        // gro-combat-input-lock.
+        public static float[] GetArmorCombatProperties(uint pid, uint armorInventoryId)
+        {
+            float[] props = new float[12];   // 0.0 = neutral identity for every combat property
+            try
+            {
+                if (armorInventoryId == 0) return props;
+                uint itemId = (pid != 0) ? GetItemIdForInventory(pid, armorInventoryId) : 0;
+                if (itemId == 0) itemId = GetItemIdByInventoryId(armorInventoryId);   // pid-agnostic fallback
+                if (itemId == 0) return props;
+                List<List<string>> tier = GetQueryResults("SELECT modefierlistid FROM armortiers WHERE iid=" + itemId);
+                if (tier.Count == 0) return props;   // equipped item isn't an armortier -> no combat properties
+                uint listId = SafeU32(tier[0][0]);
+                if (listId == 0) return props;
+                foreach (List<string> e in GetQueryResults(
+                    "SELECT proptype, methodval FROM skillmodifiers WHERE modtype=21 AND listid=" + listId))
+                {
+                    int idx = (int)SafeU32(e[0]);
+                    if (idx < 0 || idx >= props.Length) continue;
+                    float val;
+                    if (float.TryParse(e[1], System.Globalization.NumberStyles.Float,
+                                       System.Globalization.CultureInfo.InvariantCulture, out val))
+                        props[idx] += val;   // additive aggregate onto the neutral 0.0 base
+                }
+            }
+            catch { }
+            return props;
+        }
+
+        // === Per-persona armor INSERT loadout (the 4 ClassInfo_Armor defensive scalars) ===
+        // Each owned armor insert (armorinserts.iid) carries a modtype-12 modifier whose proptype selects a
+        // defensive stat. Inserts are equipped into the slots of the persona's armor tier instance and persisted
+        // here, keyed (pid, armortieriid, slotid) -> insertiid. (The legacy personaarmortiers/armorinsertslots
+        // tables aren't pid-keyed, so this clean table mirrors weaponcustomcomponents instead.)
+        private static bool _armorInsertTableReady = false;
+        private static void EnsureArmorInsertTable()
+        {
+            if (_armorInsertTableReady) return;
+            try { ExecNonQuery("CREATE TABLE IF NOT EXISTS personaarmorinserts (pid INTEGER, armortieriid INTEGER, slotid INTEGER, insertiid INTEGER, PRIMARY KEY(pid, armortieriid, slotid))"); }
+            catch { }   // DS opens the DB read-only -> CREATE fails here; the backend (read-write) creates it.
+            _armorInsertTableReady = true;
+        }
+
+        // Equip (insertIid != 0) or clear (insertIid == 0) one insert slot on a persona's armor tier instance.
+        public static void SaveArmorInsert(uint pid, uint armorTierIid, uint slotId, uint insertIid)
+        {
+            EnsureArmorInsertTable();
+            try
+            {
+                if (insertIid == 0)
+                    ExecNonQuery("DELETE FROM personaarmorinserts WHERE pid=" + pid + " AND armortieriid=" + armorTierIid + " AND slotid=" + slotId);
+                else
+                    ExecNonQuery("INSERT OR REPLACE INTO personaarmorinserts (pid,armortieriid,slotid,insertiid) VALUES (" + pid + "," + armorTierIid + "," + slotId + "," + insertIid + ")");
+            }
+            catch { }
+        }
+
+        // The insert item iids equipped on a persona's armor tier instance, ordered by slot.
+        public static List<uint> GetEquippedArmorInsertIids(uint pid, uint armorTierIid)
+        {
+            List<uint> result = new List<uint>();
+            EnsureArmorInsertTable();
+            try
+            {
+                foreach (List<string> e in GetQueryResults("SELECT insertiid FROM personaarmorinserts WHERE pid=" + pid + " AND armortieriid=" + armorTierIid + " ORDER BY slotid"))
+                    result.Add(SafeU32(e[0]));
+            }
+            catch { }
+            return result;
+        }
+
+        // The 4 ClassInfo_Armor defensive scalars aggregated from the player's EQUIPPED armor inserts.
+        // armorInventoryId -> tier iid -> equipped inserts -> each insert's modefierlistid -> skillmodifiers
+        // (modtype 12). proptype selects the stat (inferred from the XSAPI-H/R/T/C insert names + the
+        // ClassInfo_Armor field order): 1=bonusHealth, 2=bonusHealthRegen, 3=toughness, 4=criticalMitigation;
+        // methodval is summed. Returns {0,0,0,0} when no inserts are equipped (the real "no bonus" baseline).
+        // Index map: [0]=bonusHealth [1]=bonusHealthRegen [2]=toughness [3]=criticalMitigation.
+        public static float[] GetArmorScalars(uint pid, uint armorInventoryId)
+        {
+            float[] sc = new float[4];
+            try
+            {
+                if (armorInventoryId == 0) return sc;
+                uint tierIid = (pid != 0) ? GetItemIdForInventory(pid, armorInventoryId) : 0;
+                if (tierIid == 0) tierIid = GetItemIdByInventoryId(armorInventoryId);
+                if (tierIid == 0) return sc;
+                foreach (uint insertIid in GetEquippedArmorInsertIids(pid, tierIid))
+                {
+                    List<List<string>> lr = GetQueryResults("SELECT modefierlistid FROM armorinserts WHERE iid=" + insertIid);
+                    if (lr.Count == 0) continue;
+                    uint listId = SafeU32(lr[0][0]);
+                    if (listId == 0) continue;
+                    foreach (List<string> e in GetQueryResults("SELECT proptype, methodval FROM skillmodifiers WHERE modtype=12 AND listid=" + listId))
+                    {
+                        int prop = (int)SafeU32(e[0]);
+                        float val;
+                        if (!float.TryParse(e[1], System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out val)) continue;
+                        switch (prop)
+                        {
+                            case 1: sc[0] += val; break;   // bonusHealth        (XSAPI-H)
+                            case 2: sc[1] += val; break;   // bonusHealthRegen   (XSAPI-R)
+                            case 3: sc[2] += val; break;   // toughness          (XSAPI-T)
+                            case 4: sc[3] += val; break;   // criticalMitigation (XSAPI-C)
+                        }
+                    }
+                }
+            }
+            catch { }
+            return sc;
+        }
+
+        // The persona's equipped-insert loadout as GR5_PersonaArmorTier rows (for the StoreService 31 /
+        // ArmorService serve-back so the menu reflects equipped inserts). Built from personaarmorinserts.
+        public static List<GR5_PersonaArmorTier> GetPersonaArmorTiersWithInserts(uint pid)
+        {
+            List<GR5_PersonaArmorTier> result = new List<GR5_PersonaArmorTier>();
+            EnsureArmorInsertTable();
+            try
+            {
+                Dictionary<uint, GR5_PersonaArmorTier> byTier = new Dictionary<uint, GR5_PersonaArmorTier>();
+                foreach (List<string> e in GetQueryResults("SELECT armortieriid, slotid, insertiid FROM personaarmorinserts WHERE pid=" + pid + " ORDER BY armortieriid, slotid"))
+                {
+                    uint tierIid = SafeU32(e[0]);
+                    GR5_PersonaArmorTier pat;
+                    if (!byTier.TryGetValue(tierIid, out pat))
+                    {
+                        pat = new GR5_PersonaArmorTier { ArmorTierID = tierIid };
+                        byTier[tierIid] = pat;
+                        result.Add(pat);
+                    }
+                    pat.Inserts.Add(new GR5_ArmorInsertSlot { InsertID = SafeU32(e[2]), Durability = 100, SlotID = SafeU8(e[1]) });
+                }
+            }
+            catch { }
             return result;
         }
 
@@ -1341,8 +1557,8 @@ namespace QuazalWV
                 friend.m_Person.CurrentCharacterLevel + ", " +
                 friend.m_Group + ");", connection);
 
-            try { 
-                return cmd.ExecuteNonQuery() > 0;
+            try {
+                lock (dbLock) { return cmd.ExecuteNonQuery() > 0; }
             }
             catch {
                 return false;
@@ -1353,14 +1569,14 @@ namespace QuazalWV
         public static void SetAvatarPortrait(ClientInfo client, uint portraitId, uint backgroundColor)
         {
             SQLiteCommand cmd = new SQLiteCommand($"UPDATE personas SET portraitid = {portraitId}, backcolor = {backgroundColor} WHERE pid = {client.PID};" , connection);
-            try { cmd.ExecuteNonQuery(); }
+            try { lock (dbLock) { cmd.ExecuteNonQuery(); } }
             catch { return; }
         }
 
         public static void SetAvatarDecorator(ClientInfo client, uint decoratorId)
         {
             SQLiteCommand cmd = new SQLiteCommand($"UPDATE personas SET decorid = {decoratorId} WHERE pid = {client.PID};", connection);
-            try { cmd.ExecuteNonQuery(); }
+            try { lock (dbLock) { cmd.ExecuteNonQuery(); } }
             catch { return; }
         }
 

@@ -23,7 +23,24 @@ namespace QuazalWV
                     if (!client.bootStrapDone)
                     {
                         foreach (DupObj obj in DO_Session.DupObjs)
+                        {
+                            // 2-player: never hand a client ANOTHER client's Station. A peer Station carries its
+                            // own PRUDP URL; the joining client tries to open a DO connection to it at the
+                            // Station-state 3->4 transition and crashes HARD (no server error) at "connecting to
+                            // match server". Send base (non-Station) objects + host Station 1 + THIS client's own
+                            // station only; peers are seen via the separately-replicated PAWN entity (which needs
+                            // no DO participant). The (ID>=2 && ID!=stationID) guard is a no-op for one client.
+                            if (obj.Class == DupObjClass.Station && obj.ID >= 2 && obj.ID != client.stationID)
+                                continue;
+                            // ...and never a peer's PLAYER object (SES_cl_Player_NetZ, e.g. ID=257 = player-1's
+                            // NetZ avatar/params). That object was the SOLE asymmetry vs the 1st joiner's bootstrap
+                            // and is the actual crash trigger at the Station-state 3->4 transition (the peer Station
+                            // was a red herring). Each client creates its OWN player object AFTER bootstrap and sees
+                            // peers via the separately-replicated PAWN entity, so excluding these is safe + symmetric.
+                            if (obj.Class == DupObjClass.SES_cl_Player_NetZ)
+                                continue;
                             msgs.Add(DO_CreateDuplicaMessage.Create(obj, 2));
+                        }
                         client.bootStrapDone = true;
                     }
                     msgs.Add(DO_MigrationMessage.Create(client.callCounterDO_RMC++, new DupObj(DupObjClass.Station, 1), new DupObj(DupObjClass.Station, client.stationID), new DupObj(DupObjClass.Station, client.stationID), 3, new List<uint>() { new DupObj(DupObjClass.Station, client.stationID) }));

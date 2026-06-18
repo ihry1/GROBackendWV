@@ -14,9 +14,16 @@ namespace QuazalWV
         public float[] matrix = new float[16];
         public uint owner = 0x5c00002;
 
+        // Default: the local player pawn — spawn at Global.spawn*, owned by the connecting client (0x5c00002).
         public MSG_ID_Net_Obj_Create(byte bank, byte element, byte[] payload)
+            : this(bank, element, payload, Global.spawnX, Global.spawnY, Global.spawnZ, 0x5c00002) { }
+
+        // Explicit position + owner — used to spawn a SECOND entity (the fake enemy) at its own spot with a
+        // different owner so the client renders it as a remote slave it doesn't control.
+        public MSG_ID_Net_Obj_Create(byte bank, byte element, byte[] payload, float px, float py, float pz, uint ownerId)
         {
             msgID = 0x271;
+            owner = ownerId;
             MemoryStream m = new MemoryStream();
             Helper.WriteU16(m, (ushort)payload.Length);
             Helper.WriteU8(m, bank);
@@ -26,11 +33,9 @@ namespace QuazalWV
             matrix[10] = 1;
             // Spawn transform: matrix is the 4x4 world transform; col3 (indices 12/13/14) = translation,
             // verified vs game cObjectManager::SerializeOneEntity (RE/plan/03-spawn-replica-schema.md).
-            // Configure Global.spawn* to a real in-map coordinate so the player spawns in-bounds
-            // instead of at the world origin (0,0,0).
-            matrix[12] = Global.spawnX; //x
-            matrix[13] = Global.spawnY; //y
-            matrix[14] = Global.spawnZ; //z
+            matrix[12] = px; //x
+            matrix[13] = py; //y
+            matrix[14] = pz; //z
             matrix[15] = 1;
             foreach (float f in matrix)
                 Helper.WriteFloat(m, f);

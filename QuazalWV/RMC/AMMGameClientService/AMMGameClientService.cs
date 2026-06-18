@@ -27,7 +27,7 @@ namespace QuazalWV
                     // RDV_E_AMM_EVENT_SESSION_FOUND
                     NotificationQuene.AddNotification(new NotificationQueneEntry(client, 3000, 0, 1002, 2, matchReqId, sesId, 0, joinType));
                     sesId = 1;
-                    uint teamId = 1;
+                    uint teamId = 1;   // player's own RELATIVE team (own view = team 1); in-world coloring uses the pawn teamID (relative per-viewer)
                     var gameMode = "1";
                     // CallGetSessionURLs
                     NotificationQuene.AddNotification(new NotificationQueneEntry(client, 6000, 0, 1002, 3, sesId, teamId, 0, gameMode));

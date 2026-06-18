@@ -335,6 +335,19 @@ void DetourMain()
 		DetourClassInfoDiag();
 	if(FileExists("_gesture_diag_"))	//drop an empty "_gesture_diag_" file to log gesture/mood/dword5CC (A-pose) activity
 		DetourGestureDiag();
+	if(FileExists("_dolldiag_"))		//drop an empty "_dolldiag_" file in the game dir to log which doll GAO/material key never loads (lobby stuck-on-load after equipping real armor)
+	{
+		org_LoadGAOByKey_doll = (DWORD(__cdecl*)(unsigned int)) DetourFunction((PBYTE)(baseAddressAI + 0x3E5B0), (PBYTE)LoadGAOByKey_doll);
+		org_bTestMat_doll      = (char(__cdecl*)(int))          DetourFunction((PBYTE)(baseAddressAI + 0x3E4F0), (PBYTE)bTestMat_doll);
+		org_SetVisuals_doll    = (void(__fastcall*)(void*,void*,void*)) DetourFunction((PBYTE)(baseAddressAI + 0x14BD20), (PBYTE)SetVisuals_doll);
+		Log("[DOLL] Hooked SetVisuals + LoadGAOFromTreeByKey + bTestBigKeyMaterial (doll-load v2 probe)\n");
+	}
+	if(FileExists("_locodiag_"))		//drop an empty "_locodiag_" file to log whether the locomotion driver sub_100ECC30 runs for the SLAVE enemy (bot-build A-pose confirm). FP-safe; logs each distinct cGestureMix once.
+	{
+		ExportPlayerAddress();			// need playerAddress to tag the local pawn's cGestureMix (isLocalPawn)
+		org_LocoDriver_diag = (char*(__fastcall*)(void*,void*)) DetourFunction((PBYTE)(baseAddressAI + 0xECC30), (PBYTE)LocoDriver_diag);
+		Log("[LOCO] Hooked locomotion driver sub_100ECC30 (slave-playback confirm)\n");
+	}
 	if(FileExists("_moodfix_"))		//drop an empty "_moodfix_" file to re-fire UpdateMood once anim banks finish loading (fixes A-pose). Integer-only hook; no logging.
 		DetourMoodFix();
 	if(FileExists("_deploydiag_"))	//drop an empty "_deploydiag_" file to log (on-change) the deploy-ramp gate state for the local pawn. FP-safe (fxsave/fxrstor-bracketed, integer-only path).
@@ -349,8 +362,22 @@ void DetourMain()
 		org_ReadNR       = (unsigned int(__fastcall*)(void*,void*,void*)) DetourFunction((PBYTE)(baseAddressAI + 0x77C20), (PBYTE)ReadNR_probe);
 		Log("Installed [IE] early-InitEntity pinpoint hooks + [RDR] m_Mood Read_NR probe\n");
 	}
+	if(FileExists("_respawndiag_"))	//drop an empty "_respawndiag_" file to log every abstract ChangeState (cmd 0x33) reaching the client across death/respawn (confirms the bare respawn drives NO state change -> the HUD bus event never re-fires; also verifies a respawn-fix's ChangeState arrives). Pair with _deploydiag_ for the gate/currentState. Read-only, FP-safe.
+	{
+		org_ChangeState_respawndiag = (CS_FN) DetourFunction((PBYTE)(baseAddressAI + 0xD5DE0), (PBYTE)ChangeState_respawndiag);
+		Log("[RSPN] Hooked AI_EntityPlayerAbstract::cl_PlayerAbstractChangeState (respawn ChangeState diag)\n");
+	}
 	if(FileExists("_customizediag_"))	//drop an empty "_customizediag_" file to log the weapon-customize store-functor lookups + GetAttachCompType compat results (splits "no attachments offered" into functor-empty vs compat-reject).
 		DetourCustomizeDiag();
+	if(FileExists("_gpediag_"))		//drop an empty "_gpediag_" file to log cEntityManager::GetPlayerEntity(handle 1-6) -> result + entityHandlesTree membership + serializationFlags, to pin WHY the 2-client peer (handle 4) ignores relayed movement (registration vs &8-clear vs apply). FP-safe, read-only.
+	{
+		org_GetPlayerEntity_diag = (DWORD(__fastcall*)(void*,void*,int)) DetourFunction((PBYTE)(baseAddressAI + 0x98F10), (PBYTE)GetPlayerEntity_diag);
+		Log("[GPE] Hooked cEntityManager::GetPlayerEntity (2-client peer-registration probe)\n");
+		org_GetSerStruct_diag = (void*(__fastcall*)(void*,void*,int)) DetourFunction((PBYTE)(baseAddressAI + 0x92600), (PBYTE)GetSerStruct_diag);
+		Log("[GSS] Hooked AI_Entity::GetSerializationStruct (apply field-count probe)\n");
+		org_HumanReplica_diag = (void(__fastcall*)(void*,void*)) DetourFunction((PBYTE)(baseAddressAI + 0x87B40), (PBYTE)HumanReplica_diag);
+		Log("[REP] Hooked AI_EntityHuman::Replica (slave body-update / render-position probe)\n");
+	}
 	// [BLITZFIX]/[BLITZPROBE] Blitz deploy: drop "_blitzfix_" to CLAMP the out-of-range stretch coef so Blitz
 	// deploys instead of asserting; drop "_blitzprobe_" to LOG the decisive deploy/bank-load capture (the
 	// resolved rosace descriptor id/stretch + active gesture-Set + which locomotion banks 100-160 are on the
@@ -363,6 +390,14 @@ void DetourMain()
 		org_StretchRosace_blitzfix = (const char*(__fastcall*)(void*,void*,float)) DetourFunction((PBYTE)(baseAddressAI + 0xEB1E0), (PBYTE)StretchRosace_blitzfix);
 		sprintf(buffer, "[BLITZFIX] Hooked cGestureMix::StretchRosace @+0xEB1E0 (clamp=%d probe=%d)\n", g_blitzclamp, g_blitzprobe);
 		Log(buffer);
+	}
+	// [FIREPROBE] drop "_fireprobe_" in the game dir to log WHY the gun never spawns a bullet: hooks the per-shot
+	// fire gate AI_AdvancedWeaponPC::bCanFire @+0x68890 and logs its decision + every gate input each press. Read-only.
+	g_fireprobe = FileExists("_fireprobe_") ? 1 : 0;
+	if (g_fireprobe)
+	{
+		org_bCanFire = (int(__fastcall*)(void*,void*,int)) DetourFunction((PBYTE)(baseAddressAI + 0x68890), (PBYTE)bCanFire_probe);
+		Log("[FIREPROBE] Hooked AI_AdvancedWeaponPC::bCanFire @+0x68890 (fire-gate diag)\n");
 	}
 	if(FileExists("_rcdiag_"))		//drop an empty "_rcdiag_" file to log the LOCAL pawn's ReplicationCallback (RC index 12 = m_Mood->UpdateMood). READ-ONLY; confirms whether a server 0x98 reaches RC(12).
 	{
@@ -554,6 +589,12 @@ void DetourGestureDiag()
 	Log("Hooked AI_EntityPlayer::UpdateMood (gesture diag)\n");
 	org_GestureSetDword5CC_diag = (void(__fastcall*)(void*,void*)) DetourFunction((PBYTE)(baseAddressAI + 0xEC270), (PBYTE)GestureSetDword5CC_diag);
 	Log("Hooked sub_100EC270 dword5CC-setter (gesture diag)\n");
+	org_AGMM_Play_diag = (char(__fastcall*)(void*,void*,int,int,int,float,float)) DetourFunction((PBYTE)(baseAddressAI + 0x1F0070), (PBYTE)AGMM_Play_diag);
+	Log("Hooked AI_GestureMixManager::Play (swap-gesture diag)\n");
+	org_bIsSwitchingGuns_diag = (int(__fastcall*)(void*,void*)) DetourFunction((PBYTE)(baseAddressAI + 0x746B0), (PBYTE)bIsSwitchingGuns_diag);
+	Log("Hooked AI_EntityPlayer::bIsSwitchingGuns (swap-gesture diag)\n");
+	org_SetStretch_diag = (int(__cdecl*)(int,int,float)) DetourFunction((PBYTE)(baseAddressAI + 0x63420), (PBYTE)SetStretch_diag);
+	Log("Hooked ACT_vSetAnimLayerStretchCoeff (swap-gesture diag)\n");
 }
 
 void DetourMoodFix()

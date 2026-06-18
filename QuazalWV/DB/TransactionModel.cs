@@ -32,7 +32,7 @@ namespace QuazalWV.DB
                 $"SELECT last_insert_rowid();", DBHelper.connection);
             try
             {
-                return (uint)(long)cmd.ExecuteScalar();
+                lock (DBHelper.dbLock) { return (uint)(long)cmd.ExecuteScalar(); }
             }
             catch (Exception e)
             {
@@ -79,7 +79,7 @@ namespace QuazalWV.DB
                 $"SELECT last_insert_rowid();", DBHelper.connection);
             try
             {
-                return (uint)(long)cmd.ExecuteScalar();
+                lock (DBHelper.dbLock) { return (uint)(long)cmd.ExecuteScalar(); }
             }
             catch (Exception e)
             {
@@ -103,7 +103,7 @@ namespace QuazalWV.DB
                 $"VALUES ({now},{pid},0,{(uint)trType},0,0);SELECT last_insert_rowid();", DBHelper.connection);
             try
             {
-                return (uint)(long)cmd.ExecuteScalar();
+                lock (DBHelper.dbLock) { return (uint)(long)cmd.ExecuteScalar(); }
             }
             catch (Exception e)
             {
@@ -117,7 +117,7 @@ namespace QuazalWV.DB
         {
             long now = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
             SQLiteCommand cmd = new SQLiteCommand($"UPDATE transactions SET completedAt={now} WHERE id={transactionId}", DBHelper.connection);
-            return cmd.ExecuteNonQuery() > 0;
+            lock (DBHelper.dbLock) { return cmd.ExecuteNonQuery() > 0; }
         }
     }
 }

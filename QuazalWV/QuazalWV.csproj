@@ -63,6 +63,7 @@
     <Compile Include="BM\MSG_ID_BM_Warmup.cs" />
     <Compile Include="BM\MSG_ID_NetRule_Synchronize.cs" />
     <Compile Include="BM\MSG_ID_Net_Obj_Create.cs" />
+    <Compile Include="BM\MSG_ID_Net_Obj_Destroy.cs" />
     <Compile Include="BM\MSG_ID_ReceiveReplicaData.cs" />
     <Compile Include="BM\MSG_ID_SendReplicaData.cs" />
     <Compile Include="BM\ObjCreatePayloads\ClassInfo\ClassInfo_Ability.cs" />
@@ -383,6 +384,7 @@
     <Compile Include="RMC\StoreService\Request\RMCPacketRequestStoreService_CompleteBuyWeaponAndAttachComponents.cs" />
     <Compile Include="RMC\StoreService\Request\RMCPacketRequestStoreService_InitiateBuyAbilityWithUpgrades.cs" />
     <Compile Include="RMC\StoreService\Request\RMCPacketRequestStoreService_InitiateBuyAndAttachComponents.cs" />
+    <Compile Include="RMC\StoreService\Request\RMCPacketRequestStoreService_InitiateBuyAndAttachInserts.cs" />
     <Compile Include="RMC\StoreService\Request\RMCPacketRequestStoreService_InitiateBuyArmourAndAttachInserts.cs" />
     <Compile Include="RMC\StoreService\Request\RMCPacketRequestStoreService_InitiateBuyItem.cs" />
     <Compile Include="RMC\StoreService\Request\RMCPacketRequestStoreService_InitiateBuyWeaponAndAttachComponents.cs" />
