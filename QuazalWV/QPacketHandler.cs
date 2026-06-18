@@ -93,6 +93,10 @@ namespace QuazalWV
                 uiSeqId = p.uiSeqId,
                 payload = new byte[0]
             };
+            // NOTE: do NOT remove the client here -- a DISCONNECT packet fires during the normal connection
+            // lifecycle (lobby/login service cycling), not only on a real match-leave, so removing on it broke
+            // login ("Cant find client" storm on station-0 lobby connections). Gone match clients are reaped by
+            // Global.SweepIdleMatchClients (idle-timeout, deployed-only) instead.
             return reply;
         }
 
@@ -137,6 +141,7 @@ namespace QuazalWV
                 ClientInfo client = null;
                 if (p.type != QPacket.PACKETTYPE.SYN && p.type != QPacket.PACKETTYPE.NATPING)
                     client = Global.GetClientByIDrecv(p.m_uiSignature);
+                if (client != null) client.lastSeen = DateTime.UtcNow;   // any packet (DATA/PING/keepalive) keeps the conn alive for Global.SweepIdleMatchClients, so a player idling on the respawn screen isn't falsely reaped
                 switch (p.type)
                 {
                     case QPacket.PACKETTYPE.SYN:

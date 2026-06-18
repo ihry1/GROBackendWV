@@ -607,6 +607,295 @@ void __fastcall GestureSetDword5CC_diag(void* THIS, void* EDX)
 	}
 }
 
+// ---- SWAP-GESTURE LOCK diagnostics (2026-06-16): why does switching to the pistol (or AFK-return) lock
+// combat to walk/run only? The weapon-select action's per-frame Update IS AI_EntityPlayer::bIsSwitchingGuns
+// (@0x100746B0), which is true iff a swap gesture (id 9/10/11/12) is active. If it sticks TRUE the action
+// never leaves the active list -> CheckPriority blocks fire/ADS/stance/cover/grenade/swap (movement is
+// ungated). ProcessOrder case 3 plays the swap as AI_GestureMixManager::Play(mgr, 9 [pistol], order 3,
+// animID -1) (@0x101F0070). Both hooks are read-only passthroughs.
+char (__fastcall* org_AGMM_Play_diag)(void*, void*, int, int, int, float, float);
+int  (__fastcall* org_bIsSwitchingGuns_diag)(void*, void*);
+int  g_swg_last = -1;
+
+char __fastcall AGMM_Play_diag(void* THIS, void* EDX, int gestureID, int orderID, int animID, float a5, float a6)
+{
+	// THIS = AI_GestureMixManager; cGestureMix is at +8; gesture_Set @cGestureMix+0x604 => THIS+0x60C.
+	// Replicate cGestureMix::Play's lookup: idx = gestureID + 172*set; slotId = *(u16*)(cGestureList::Get()+132+(idx<<6)).
+	// slotId == gestureID => gesture IS registered in this set; 0xFFFF/65535 => empty slot (not registered); set=-1 => InitSet never ran.
+	int gset = *(int*)((char*)THIS + 0x60C);
+	int slotId = -2;          // -2 = not computed (set out of range)
+	int idx = -1;
+	if ((unsigned)gset < 8)
+	{
+		int (__cdecl* GetList)() = (int(__cdecl*)())(baseAddressAI + 0x9BC0);   // cGestureList::Get
+		int listBase = GetList();
+		idx = gestureID + 172 * gset;
+		if (listBase && idx >= 0 && idx < 0x560)
+			slotId = *(unsigned short*)(listBase + 132 + (idx << 6));
+	}
+	char res = org_AGMM_Play_diag(THIS, EDX, gestureID, orderID, animID, a5, a6);
+	sprintf(buffer, "[PLAY] gesture=%d order=%d animID=%d set=%d idx=%d slotId=%d -> %d\n\0",
+		gestureID, orderID, animID, gset, idx, slotId, (int)res);
+	Log(buffer);
+	return res;
+}
+
+int __fastcall bIsSwitchingGuns_diag(void* THIS, void* EDX)
+{
+	int res = org_bIsSwitchingGuns_diag(THIS, EDX);
+	if (res != g_swg_last)   // transition-only, to avoid per-frame flooding
+	{
+		sprintf(buffer, "[SWG] bIsSwitchingGuns -> %d%s\n\0", res, res ? "  (swap gesture ACTIVE)" : "  (clear)");
+		Log(buffer);
+		g_swg_last = res;
+	}
+	return res;
+}
+
+// ACT_vSetAnimLayerStretchCoeff(gao, layer, coef) = engine call that sets a layer's playback SPEED. coef==0 => the
+// anim is FROZEN (never advances => the gesture never completes). For the draw gesture this confirms whether the
+// swap stretch is 0 (i.e. the draw anim duration computed to 0 => its clip/bank isn't loaded). Low volume (per Play).
+int (__cdecl* org_SetStretch_diag)(int, int, float);
+int __cdecl SetStretch_diag(int gao, int layer, float coef)
+{
+	int r = org_SetStretch_diag(gao, layer, coef);
+	sprintf(buffer, "[STR] SetAnimLayerStretch layer=%d coef=%f\n\0", layer, coef);
+	Log(buffer);
+	return r;
+}
+
+// --- [DOLL] lobby character-doll load diagnostic v2 (installed only when a "_dolldiag_" file exists). ---
+// "Stuck on the loading screen after equipping REAL armor": the select-screen dolls build via
+// AI_EntityHumanModel::SetVisuals (@0x14BD20) -> isLoading=1 -> AI_CharacterVisualManager::LoadCharacterVisualsAsync
+// (@0x1CF450), which returns 1 only when all 4 GAOs + 5 material templates load, else returns 0 and re-issues the
+// loads EVERY frame -> if one asset never loads, isLoading never clears -> stuck. v1's caller-range-filtered leaf
+// hooks logged nothing, so either the doll never starts or the filter missed it; v2 disambiguates:
+//   [DOLL-SETVIS]   = a doll load STARTED; logs the exact visual fields (class/camo/head/helmet/power/skin) so the
+//                     bad served field shows up by inspection (deduped by field combo).
+//   [DOLL-* STUCK]  = a GAO/material key re-requested >=120x while NEVER loading = the stuck asset (the hang). Only
+//                     not-yet-loaded keys are tracked (small table); logs the IDA-rebased caller.
+//   [DOLL] leaf active = first leaf call seen -> proves the detours installed (infra check).
+// All read-only passthroughs, FP-safe (fxsave/fxrstor-bracketed so the renderer's x87/SSE state can't be clobbered).
+DWORD (__cdecl* org_LoadGAOByKey_doll)(unsigned int) = 0;
+char  (__cdecl* org_bTestMat_doll)(int) = 0;
+void  (__fastcall* org_SetVisuals_doll)(void*, void*, void*) = 0;
+__declspec(align(16)) BYTE g_doll_fxbuf[512];
+struct DollKeyStat { DWORD key; int type; DWORD count; int everLoaded; DWORD caller; int logged; };
+DollKeyStat g_doll_ks[1024];
+int g_doll_ksN = 0;
+int g_doll_leaf_seen = 0;
+DWORD g_sv_seen[24];
+int g_sv_seenN = 0;
+const DWORD DOLL_STUCK_THRESH = 120;   // requested this many frames while never loading => stuck async retry
+// Track a not-yet-loaded key; log once when it crosses the stuck threshold without ever loading. type 0=GAO,1=material.
+void Doll_Track(DWORD key, int type, int loaded, DWORD ret)
+{
+	int i = -1;
+	for (int k = 0; k < g_doll_ksN; k++)
+		if (g_doll_ks[k].key == key && g_doll_ks[k].type == type) { i = k; break; }
+	if (i < 0)
+	{
+		if (loaded) return;                       // loaded on first try -> never stuck, don't track
+		if (g_doll_ksN >= 1024) return;
+		i = g_doll_ksN++;
+		g_doll_ks[i].key = key; g_doll_ks[i].type = type; g_doll_ks[i].count = 0;
+		g_doll_ks[i].everLoaded = 0; g_doll_ks[i].caller = ret; g_doll_ks[i].logged = 0;
+	}
+	g_doll_ks[i].count++;
+	if (loaded) g_doll_ks[i].everLoaded = 1;
+	else g_doll_ks[i].caller = ret;
+	if (!g_doll_ks[i].everLoaded && !g_doll_ks[i].logged && g_doll_ks[i].count >= DOLL_STUCK_THRESH)
+	{
+		g_doll_ks[i].logged = 1;
+		DWORD ida = (g_doll_ks[i].caller - baseAddressAI) + 0x10000000;
+		_fxsave(g_doll_fxbuf);
+		sprintf(buffer, "[DOLL-%s STUCK] key=0x%08X never loaded after %u reqs, caller=0x%08X\n\0",
+			type ? "MAT" : "GAO", key, g_doll_ks[i].count, ida);
+		Log(buffer);
+		_fxrstor(g_doll_fxbuf);
+	}
+}
+DWORD __cdecl LoadGAOByKey_doll(unsigned int key)
+{
+	DWORD r = org_LoadGAOByKey_doll(key);
+	DWORD ret = (DWORD)_ReturnAddress();
+	if (ret >= baseAddressAI && ret < baseAddressAI + 0x782000)   // calls from within AICLASS
+	{
+		if (!g_doll_leaf_seen) { g_doll_leaf_seen = 1; _fxsave(g_doll_fxbuf); Log("[DOLL] leaf active\n\0"); _fxrstor(g_doll_fxbuf); }
+		Doll_Track(key, 0, r ? 1 : 0, ret);
+	}
+	return r;
+}
+char __cdecl bTestMat_doll(int key)
+{
+	char r = org_bTestMat_doll(key);
+	DWORD ret = (DWORD)_ReturnAddress();
+	if (ret >= baseAddressAI && ret < baseAddressAI + 0x782000)
+		Doll_Track((DWORD)key, 1, r ? 1 : 0, ret);
+	return r;
+}
+// AI_EntityHumanModel::SetVisuals(this, CharacterVisuals*): the doll-load entry. CharacterVisuals = {class@0,
+// head@4, helmet@8, camo@12(byte), skinTone@13(byte), power@16}. Logs the served fields (deduped) -> the bad one.
+void __fastcall SetVisuals_doll(void* THIS, void* EDX, void* visuals)
+{
+	DWORD cls = 0, head = 0, helmet = 0, power = 0; BYTE camo = 0, skin = 0;
+	if (visuals)
+	{
+		BYTE* v = (BYTE*)visuals;
+		cls = *(DWORD*)(v + 0); head = *(DWORD*)(v + 4); helmet = *(DWORD*)(v + 8);
+		camo = *(v + 12); skin = *(v + 13); power = *(DWORD*)(v + 16);
+	}
+	org_SetVisuals_doll(THIS, EDX, visuals);
+	if (visuals)
+	{
+		DWORD sig = cls ^ ((DWORD)camo << 8) ^ ((DWORD)skin << 16) ^ (helmet << 1) ^ (power << 4);
+		for (int i = 0; i < g_sv_seenN; i++) if (g_sv_seen[i] == sig) return;
+		if (g_sv_seenN < 24) g_sv_seen[g_sv_seenN++] = sig;
+		_fxsave(g_doll_fxbuf);
+		sprintf(buffer, "[DOLL-SETVIS] class=0x%08X camo=%u head=0x%08X helmet=0x%08X power=%u skin=%u\n\0",
+			cls, (DWORD)camo, head, helmet, (DWORD)power, (DWORD)skin);
+		Log(buffer);
+		_fxrstor(g_doll_fxbuf);
+	}
+}
+
+// [LOCO] diagnostic (installed only when a "_locodiag_" file exists): does the per-frame locomotion driver
+// sub_100ECC30 -- the function that plays the rosace clip from cGestureMix.dword5CC(+0x5CC) onto the ACT layers --
+// actually RUN for the SLAVE fake-enemy? THIS = the cGestureMix. If only the LOCAL pawn's cGestureMix ever calls
+// it (isLocalPawn=1 only) -> the slave never reaches the playback => confirms the Replica-path wall. If a non-local
+// cGestureMix also appears -> the driver DOES run for the enemy and the A-pose is deeper. Logs each distinct THIS
+// once (no per-frame flood). FP-SAFE: the sprintf/Log is bracketed by _fxsave/_fxrstor so it can't clobber the
+// anim/weapon x87/SSE state (that is what broke ADS/firing with earlier diagnostic hooks).
+char* (__fastcall* org_LocoDriver_diag)(void*, void*) = 0;
+__declspec(align(16)) BYTE g_loco_fxbuf[512];
+DWORD g_loco_seen[16] = { 0 };
+int   g_loco_seenN = 0;
+char* __fastcall LocoDriver_diag(void* THIS, void* EDX)
+{
+	DWORD t = (DWORD)THIS;
+	int known = 0;
+	for (int i = 0; i < g_loco_seenN; i++) if (g_loco_seen[i] == t) { known = 1; break; }
+	if (!known && g_loco_seenN < 16)
+	{
+		g_loco_seen[g_loco_seenN++] = t;
+		_fxsave(g_loco_fxbuf);
+		DWORD desc = (t >= 0x10000 && t < 0x80000000) ? *(DWORD*)(t + 0x5CC) : 0;
+		int isLocal = 0;
+		if (playerAddress) { DWORD mgr = *(DWORD*)(playerAddress + 0xF6C); if (mgr && (mgr + 8) == t) isLocal = 1; }
+		sprintf(buffer, "[LOCO] sub_100ECC30 THIS=0x%08X dword5CC=0x%08X isLocalPawn=%d\n\0", t, desc, isLocal);
+		Log(buffer);
+		_fxrstor(g_loco_fxbuf);
+	}
+	return org_LocoDriver_diag(THIS, EDX);
+}
+
+// --- [GPE] 2-client peer-registration probe (installed only when a "_gpediag_" file exists). ---
+// Hooks cEntityManager::GetPlayerEntity(handle) @0x10098F10 -- the gate the replica-apply
+// (cEntityManager::ReceiveReplicatedData) uses to find the pawn a 0x99 movement update targets.
+// For the pawn handles (1-6) it logs the returned ptr PLUS a read-only manual BST walk of
+// entityHandlesTree (cEntityManager+0xCB8, rootNode@+8; node: left@0 / right@4 / handle@16 /
+// entityPlayer@20) so that when result==NULL we can tell registration-failed (not in tree) from
+// present-but-&8-clear (init-done not set). serializationFlags @entity+0x30 (&1=master, &2=server,
+// &8=init-done). This pins WHY the 2-client peer (handle 4) discards the relayed movement. The own
+// pawn (handle 2, working) is logged too as a baseline/contrast. FP-safe (fxsave/fxrstor-bracketed).
+DWORD (__fastcall* org_GetPlayerEntity_diag)(void*, void*, int) = 0;
+__declspec(align(16)) BYTE g_gpe_fxbuf[512];
+int g_gpe_logN[8] = { 0,0,0,0,0,0,0,0 };
+DWORD __fastcall GetPlayerEntity_diag(void* THIS, void* EDX, int handle)
+{
+	DWORD result = org_GetPlayerEntity_diag(THIS, EDX, handle);
+	int h = handle & 0xFF;
+	if (h >= 1 && h <= 6 && g_gpe_logN[h] < 20)
+	{
+		g_gpe_logN[h]++;
+		_fxsave(g_gpe_fxbuf);
+		int inTree = 0; DWORD ent = 0, flags = 0;
+		__try
+		{
+			DWORD node = *(DWORD*)((DWORD)THIS + 0xCB8 + 8);   // entityHandlesTree.rootNode
+			int guard = 0;
+			while (node >= 0x10000 && guard++ < 64)
+			{
+				DWORD nh = *(DWORD*)(node + 16);               // node->handle
+				if (nh == (DWORD)h) { inTree = 1; ent = *(DWORD*)(node + 20); if (ent >= 0x10000) flags = *(DWORD*)(ent + 0x30); break; }
+				node = (nh < (DWORD)h) ? *(DWORD*)(node + 4) : *(DWORD*)(node + 0);   // BST: right if node.handle<h else left
+			}
+		}
+		__except (1) { inTree = -1; }
+		sprintf(buffer, "[GPE] h=%d GetPlayerEntity->0x%08X | inTree=%d ent=0x%08X flags=0x%X (m=%d srv=%d init8=%d)\n\0",
+			h, result, inTree, ent, flags, (flags & 1), (flags >> 1) & 1, (flags >> 3) & 1);
+		Log(buffer);
+		_fxrstor(g_gpe_fxbuf);
+	}
+	return result;
+}
+
+// --- [GSS] serialization-struct field-count probe (same "_gpediag_" flag). The [GPE] probe proved the peer
+// (handle 4) IS found by GetPlayerEntity, so the replica-apply (ReceiveReplicatedData) reaches it -- yet the
+// body doesn't move. This checks the next gate: does the entity's serialization struct (where the apply writes
+// the deserialized position fields) actually HAVE fields, or is it EMPTY (slave skipped RegisterReplicatedData)?
+// AI_Entity::GetSerializationStruct @0x10092600 (entity, useStruct1)->struct; RRD reads fieldCount = struct[1]
+// (*(struct+4)) then loops applying that many fields. entity handle @entity+0x1C. Logs entity ptr too so it can
+// be cross-referenced to the [GPE] peer ptrs. FP-safe (fxsave/fxrstor-bracketed).
+void* (__fastcall* org_GetSerStruct_diag)(void*, void*, int) = 0;
+__declspec(align(16)) BYTE g_gss_fxbuf[512];
+int g_gss_logN[8] = { 0,0,0,0,0,0,0,0 };
+void* __fastcall GetSerStruct_diag(void* entity, void* EDX, int useStruct1)
+{
+	void* st = org_GetSerStruct_diag(entity, EDX, useStruct1);
+	int h = ((DWORD)entity >= 0x10000) ? (*(int*)((char*)entity + 0x1C) & 0xFF) : 0;
+	if (h >= 1 && h <= 6 && g_gss_logN[h] < 16)
+	{
+		g_gss_logN[h]++;
+		_fxsave(g_gss_fxbuf);
+		int fcount = -1;
+		__try { if ((DWORD)st >= 0x10000) fcount = *(int*)((char*)st + 4); } __except (1) { fcount = -2; }
+		sprintf(buffer, "[GSS] h=%d entity=0x%08X useStruct1=%d struct=0x%08X fieldCount=%d\n\0",
+			h, (DWORD)entity, useStruct1, (DWORD)st, fcount);
+		Log(buffer);
+		_fxrstor(g_gss_fxbuf);
+	}
+	return st;
+}
+
+// --- [REP] slave body-update / render-position probe (same "_gpediag_" flag). GSS proved the apply WRITES the
+// transform to the peer; this checks the LAST link: does the per-frame slave body-update (AI_EntityHuman::Replica
+// @0x10087b40, gated &8, reads replNetPos -> OBJ_SetMatrix) actually MOVE the rendered body? Runs the original,
+// then reads the peer's GAO (entity+0x14) world-matrix translation via OBJ_mxGetMatrix @0x1001FE80 (col3 =
+// mx[12..14]). Samples every 20th call (so 60 logs spread across the run). If bodyPos CHANGES as the other player
+// walks -> apply+render work (the freeze is elsewhere); if CONSTANT at spawn -> the applied position never reaches
+// the body = the real wall. FP-safe (fxsave/fxrstor), __try-guarded around the engine call.
+void (__fastcall* org_HumanReplica_diag)(void*, void*) = 0;
+__declspec(align(16)) BYTE g_rep_fxbuf[512];
+int g_rep_callN[8] = { 0,0,0,0,0,0,0,0 };
+int g_rep_logN = 0;
+void __fastcall HumanReplica_diag(void* THIS, void* EDX)
+{
+	org_HumanReplica_diag(THIS, EDX);                 // run the real body-update first
+	int h = ((DWORD)THIS >= 0x10000) ? (*(int*)((char*)THIS + 0x1C) & 0xFF) : 0;
+	if (h >= 3 && h <= 4)
+	{
+		g_rep_callN[h]++;
+		if (g_rep_callN[h] % 20 == 0 && g_rep_logN < 60)
+		{
+			g_rep_logN++;
+			_fxsave(g_rep_fxbuf);
+			float x = -88888.0f, y = 0, z = 0; DWORD gao = 0;
+			__try {
+				gao = *(DWORD*)((char*)THIS + 0x14);
+				if (gao >= 0x10000) {
+					float mx[16];
+					((void (__cdecl*)(void*, void*))(baseAddressAI + 0x1FE80))(mx, (void*)gao);   // OBJ_mxGetMatrix(out, gao)
+					x = mx[12]; y = mx[13]; z = mx[14];                                            // col3 = translation
+				}
+			} __except (1) { x = -99999.0f; }
+			sprintf(buffer, "[REP] h=%d entity=0x%08X gao=0x%08X bodyPos=(%.3f, %.3f, %.3f)\n\0", h, (DWORD)THIS, gao, x, y, z);
+			Log(buffer);
+			_fxrstor(g_rep_fxbuf);
+		}
+	}
+}
+
 // ============================================================================
 // A-POSE MOOD FIX  (installed only when a "_moodfix_" file exists)  -- NON-DIAGNOSTIC
 // ----------------------------------------------------------------------------
@@ -793,6 +1082,35 @@ char* __fastcall LocomotionApply_guard(void* THIS, void* EDX)
 // I/O note: bIsClientReady() itself emits one DBG_SendSessionLog line on the frames where
 // the networked player-params aren't available yet; that is the game's own log, fires at
 // most a handful of times before the server sets the bit, and is harmless.
+// ===== _respawndiag_ : AI_EntityPlayerAbstract::cl_PlayerAbstractChangeState @0x100d5de0 =====
+// Logs every abstract ChangeState (entity-cmd 0x33) reaching the client + the currentState transition.
+// Across a death->respawn->(ESC twice) this confirms whether the emulator drives the abstract state
+// machine at all (expected on the bare destroy+recreate respawn: NOTHING -> currentState stays 5 -> the
+// HUD bus event never re-fires; and ESC-twice firing NO ChangeState would prove the HUD restore is a
+// direct UI path, not an abstract-state one). Also verifies a respawn fix's ChangeState actually arrives.
+// The target is __userpurge(this@ecx, a2@st0, cmd@stack); declaring it __fastcall(THIS=ecx, EDX, cmd)
+// is binary-correct because a2 lives in st0 (NOT on the stack), so cmd is the first stack slot. We do
+// ONLY integer reads before calling the original, so st0(=a2) stays intact for it; the log is
+// fxsave/fxrstor-bracketed (sprintf/Log clobber x87/SSE). currentState @+0x15C, serializationFlags @+0x30.
+typedef int (__fastcall* CS_FN)(void*, void*, void*);
+CS_FN org_ChangeState_respawndiag = 0;
+__declspec(align(16)) static unsigned char g_cs_fxbuf[512];
+
+int __fastcall ChangeState_respawndiag(void* THIS, void* EDX, void* cmd)
+{
+	int oldState = THIS ? *(int*)((char*)THIS + 0x15C) : -999;        // currentState BEFORE (integer; st0=a2 preserved)
+	int flags    = THIS ? *(unsigned char*)((char*)THIS + 0x30) : 0;  // serializationFlags (&1 = local player)
+	int result   = org_ChangeState_respawndiag(THIS, EDX, cmd);       // run original (st0 still = a2)
+	int newState = THIS ? *(int*)((char*)THIS + 0x15C) : -999;        // currentState AFTER (== the requested state)
+	_fxsave(g_cs_fxbuf);
+	char b[200];
+	sprintf(b, "[RSPN-CS] cl_PlayerAbstractChangeState this=0x%08X local=%d  currentState %d -> %d\n",
+		(unsigned int)THIS, flags & 1, oldState, newState);
+	Log(b);
+	_fxrstor(g_cs_fxbuf);
+	return result;
+}
+
 typedef int (__fastcall* SPAWN_FN)(void*, void*, float);
 SPAWN_FN org_Spawn_deploydiag = 0;
 
@@ -1556,6 +1874,51 @@ const char* __fastcall StretchRosace_blitzfix(void* THIS, void* EDX, float a2)
 	}
 	// clamp only if _blitzfix_ is armed; probe-only run passes the original (crashing) coef through (read-only)
 	return org_StretchRosace_blitzfix(THIS, EDX, g_blitzclamp ? safe : a2);
+}
+
+// [FIREPROBE] flag-gated READ-ONLY diag (drop "_fireprobe_" in the game dir to arm). The gun plays the fire
+// animation + sends FireAction but has NEVER spawned a bullet. The local bullet (AI_EntityDynamic::Post path-2)
+// only discharges when AI_AdvancedWeaponPC::bCanFire(triggerHeld) @+0x68890 GRANTS the shot (sets this->bCanFire
+// @0x580=1), which needs ALL: ammo (*(ammoCounter@0x4EC +8) > 0), GetOwnerEntityPawn()@+0x65FE0 != 0 (resolves
+// ownerEntityHandle@0x24 -> a subclass-10 pawn) AND ownerPawn+20 != 0, and the rate/burst window. This hook calls
+// through, then logs the decision + every gate input per press to split which gate kills the shot: never-held
+// (the trigger->fire-intent / Post toggle side never asks) vs ammo vs OWNER-LINK (prime suspect: weapon not bound
+// to the pawn -> a server/load fix) vs rate. Integer reads are FP-safe; the GetOwnerEntityPawn call + sprintf are
+// _fxsave-bracketed. Pure read-only; delete the flag to revert.
+__declspec(align(16)) static unsigned char g_fire_fxbuf[512];
+int (__fastcall* org_bCanFire)(void*, void*, int) = 0;
+int g_fireprobe = 0;
+static int g_fire_n = 0;
+int __fastcall bCanFire_probe(void* THIS, void* EDX, int triggerHeld)
+{
+	// gate INPUTS, read before the gate mutates state (all integer -> FP-safe)
+	DWORD ammoC = *(DWORD*)((char*)THIS + 0x4EC);
+	int   ammo  = (ammoC >= 0x10000 && ammoC < 0x80000000) ? *(int*)(ammoC + 8) : -1;
+	DWORD ownH  = *(DWORD*)((char*)THIS + 0x24);            // ownerEntityHandle (raw)
+	int   burst = *(int*)((char*)THIS + 0x478);
+	int   ret   = org_bCanFire(THIS, EDX, triggerHeld);    // run the real gate (we have not touched FP)
+	DWORD granted = *(unsigned char*)((char*)THIS + 0x580);// this->bCanFire (1 = shot granted -> Fire() discharges)
+	if (g_fireprobe && (triggerHeld || ret || granted || (g_fire_n % 400 == 0)))
+	{
+		_fxsave(g_fire_fxbuf);
+		DWORD owner = ((DWORD(__thiscall*)(void*))(baseAddressAI + 0x65FE0))(THIS);  // GetOwnerEntityPawn (resolved)
+		// rounds-per-shot = ranged-weapon propList (weapon+0x28) -> GetProperty(38) [vtable slot8] -> +0x14 (float).
+		// FireProjectile's projectile-spawn loop `for(;rps>0;--rps) ProjectileManager::Fire(...)` runs THIS many
+		// times. 0x3F800000(=1.0) => normal; 0x00000000(=0) => loop never runs => NO bullet (the bug we're chasing).
+		DWORD pl = (DWORD)THIS + 0x28, plv = *(DWORD*)pl, rps = 0xFFFFFFFF;
+		if (plv >= 0x10000 && plv < 0x80000000)
+		{
+			DWORD getp = *(DWORD*)(plv + 8);
+			DWORD ent = ((DWORD(__thiscall*)(void*, int))getp)((void*)pl, 38);
+			if (ent >= 0x10000 && ent < 0x80000000) rps = *(DWORD*)(ent + 0x14);
+		}
+		sprintf(buffer, "[FIREPROBE] held=%d ret=%d granted=%u | ammo=%d roundsPerShot=0x%08X ownerHandle=0x%08X ownerPawn=0x%08X burst=%d wpn=0x%08X\n",
+			triggerHeld, ret, granted, ammo, rps, ownH, owner, burst, (DWORD)THIS);
+		Log(buffer);
+		_fxrstor(g_fire_fxbuf);
+	}
+	if (g_fireprobe) g_fire_n++;
+	return ret;
 }
 
 // [IRONF] iron-sight BLEND factor diag (installed with "_moodorder_"): hook AI_CameraBase::GetIronSightFactor

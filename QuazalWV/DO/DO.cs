@@ -79,7 +79,7 @@ namespace QuazalWV
                 case METHOD.GetParticipantsRequest:
                     client.seqCounterDO = 1;
                     client.callCounterDO_RMC = 1;
-                    client.stationID = 2;
+                    Global.EnsureStation(client);   // distinct station per client (2,3,...) instead of hardcoded 2
                     replyPayload = DO_GetParticipantsRequestMessage.HandleMessage(client, data);
                     break;
                 case METHOD.FetchRequest:

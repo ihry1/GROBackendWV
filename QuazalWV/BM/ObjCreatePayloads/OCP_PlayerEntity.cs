@@ -163,7 +163,20 @@ namespace QuazalWV
             Helper.WriteU8(m, classID);                    // classId           u8 (read second; STORE keys on this == m_Class=0)
             Helper.WriteFloatLE(m, Health);                // healthPoints      float BE
             Helper.WriteU32LE(m, 0);                       // cMemBuffer field  u32 BE (=0)
-            Helper.WriteU8(m, 0);                          // ragdollSyncFlags  u8
+            // ragdollSyncFlags u8 = 2 (bit1 "alive" SET). ★★ THE 2-CLIENT PEER-FREEZE FIX (2026-06-15).
+            // This byte becomes AI_EntityPlayer+0xB4 (AI_EntityDynamic::LoadFrom @0x1009544a reads it last in the
+            // dynamic tail). For a SLAVE (the peer pawn on the OTHER player's screen) AI_EntityHuman::Replica
+            // @0x10087b40 gates ALL body movement behind CheckRagdollFlag1 @0x10095570 = ((+0xB4 & 2)==0):
+            // bit1 CLEAR -> early-return BEFORE OBJ_SetMatrix -> body FROZEN/A-posed at spawn; bit1 SET -> runs
+            // sub_1008CC40 (copies m_ReplicatedPosition.repValue -> replNetPos every frame) -> OBJ_SetMatrix ->
+            // body follows the relayed 0x99 transform. The whole replication chain (relay -> m_ReplicatedPosition
+            // -> replNetPos -> body) was already proven working; this gate was the ONLY broken link. Retail set
+            // bit1 via ECMD_UpdateHealthState(alive=true) right after spawn (ProcessCmd case 0x20: flag0->bit1),
+            // but that cmd is MASTER-ONLY (AI_Entity::ProcessCmdFromNetwork asserts for a slave -> crash) so a
+            // PEER can NEVER receive it -> bake the alive bit into the create-blob. Was 0 = the exact reason the
+            // peer A-posed while its own (master) pawn moved fine. Local pawn unaffected (master path doesn't use
+            // this gate, and its own UpdateHealthState rewrites it to 2 anyway).
+            Helper.WriteU8(m, 2);                          // ragdollSyncFlags  u8 (2 = alive; see above)
 
             // ================= AI_EntityPlayer tail =================
             Helper.WriteU8(m, 0);                          // actionProcessCount u8
@@ -199,7 +212,7 @@ namespace QuazalWV
                         break;
 
                     case ClassInfoMemBuffer.eArmor:
-                        ClassInfo_Armor armorInfo = new ClassInfo_Armor(armorInventoryID);
+                        ClassInfo_Armor armorInfo = new ClassInfo_Armor(armorInventoryID, pid); // pid -> resolve THIS persona's equipped-armor-tier combat properties (0-safe: pid==0 / DB miss -> neutral 0.0)
                         armorInfo.memBufferSize = Convert.ToByte(armorInfo.MakePayload().Length - 1);
                         buffer = armorInfo.MakePayload();
                         m.Write(buffer, 0, buffer.Length);

@@ -51,6 +51,12 @@ namespace QuazalWV
                 case 31:
                     rmc.request = new RMCPacketRequestStoreService_CompleteBuyArmourAndAttachInserts(s);
                     break;
+                case 32: // InitiateBuyAndAttachInserts (attach inserts to an OWNED armor -- analog of weapon 22)
+                    rmc.request = new RMCPacketRequestStoreService_InitiateBuyAndAttachInserts(s);
+                    break;
+                case 33: // CompleteBuyAndAttachInserts (TransactionId only -- reuse method-31's parser)
+                    rmc.request = new RMCPacketRequestStoreService_CompleteBuyArmourAndAttachInserts(s);
+                    break;
                 default:
                     // CUSTOMIZE-CAPTURE: dump the raw body so an unrecognized customize/store apply
                     // reveals its exact method id + bytes on the first in-game test.
@@ -197,25 +203,123 @@ namespace QuazalWV
                     RMC.SendResponseWithACK(client.udp, p, rmc, client, reply);
                     break;
                 case 30:
-                    var buyArmorWithInsertsInitReq = (RMCPacketRequestStoreService_InitiateBuyArmourAndAttachInserts)rmc.request;
-                    trId = TransactionModel.SaveMultiItemTransaction(
-                        client.PID,
-                        buyArmorWithInsertsInitReq.ArmorSkuData.SkuId,
-                        TransactionType.BuyArmourAndAttachInserts,
-                        buyArmorWithInsertsInitReq.ArmorSkuData.VirtualCurrencyType,
-                        buyArmorWithInsertsInitReq.InsertSKUIdSlots
-                    );
-                    reply = new RMCPacketResponseStoreService_InitiateBuyArmourAndAttachInserts(trId);
-                    RMC.SendResponseWithACK(client.udp, p, rmc, client, reply);
-                    // send complete transaction notif on success
-                    if (trId > 0)
-                        SendCompleteNotif(client, trId);
+                    {
+                        var buyArmorWithInsertsInitReq = (RMCPacketRequestStoreService_InitiateBuyArmourAndAttachInserts)rmc.request;
+                        Log.WriteLine(1, "[RMC Store][CAPTURE] (30) InitiateBuyArmourAndAttachInserts pid=" + client.PID
+                            + " ArmorSku=" + buyArmorWithInsertsInitReq.ArmorSkuData.SkuId
+                            + " InsertSku=[" + string.Join(",", buyArmorWithInsertsInitReq.InsertSKUIdSlots.Select(x => x.Id + "@" + x.Slot)) + "]"
+                            + " InsertInv=[" + string.Join(",", buyArmorWithInsertsInitReq.InsertInventoryIdSlots.Select(x => x.Id + "@" + x.Slot)) + "]"
+                            + " Remove=[" + string.Join(",", buyArmorWithInsertsInitReq.RemoveInventory.Select(x => x.Id + "@" + x.Slot)) + "]"
+                            + " Coupons=[" + string.Join(",", buyArmorWithInsertsInitReq.CouponIds) + "]", Color.Cyan);
+                        // PERSIST (mirrors the weapon-customize method 22 lane): attach the chosen OWNED inserts to
+                        // the persona's currently-equipped armor tier. Target tier == the SAME one ClassInfo_Armor
+                        // reads in-match (GetSpawnLoadout's ArmorInventoryID -> tier iid), so equip + spawn agree.
+                        // Keyed (pid, tierIid, slot). Guarded so it can never break the menu. SkuComps (bought-new
+                        // inserts) path is capture-pending. See [DS] armor inserts log + gro-combat-input-lock.
+                        try
+                        {
+                            SpawnLoadoutInfo lo = DBHelper.GetSpawnLoadout(client.PID);
+                            uint tierIid = DBHelper.GetItemIdForInventory(client.PID, lo.ArmorInventoryID);
+                            if (tierIid == 0) tierIid = DBHelper.GetItemIdByInventoryId(lo.ArmorInventoryID);
+                            if (tierIid != 0)
+                            {
+                                foreach (GR5_IdSlotPair pair in buyArmorWithInsertsInitReq.InsertInventoryIdSlots)
+                                {
+                                    uint insIid = DBHelper.GetItemIdForInventory(client.PID, pair.Id);
+                                    if (insIid == 0) insIid = DBHelper.GetItemIdByInventoryId(pair.Id);
+                                    DBHelper.SaveArmorInsert(client.PID, tierIid, pair.Slot, insIid);
+                                }
+                                foreach (GR5_IdSlotPair pair in buyArmorWithInsertsInitReq.RemoveInventory)
+                                    DBHelper.SaveArmorInsert(client.PID, tierIid, pair.Slot, 0);
+                                Log.WriteLine(1, "[RMC Store][PERSIST] armor inserts tierIid=" + tierIid
+                                    + " now=[" + string.Join(",", DBHelper.GetEquippedArmorInsertIids(client.PID, tierIid)) + "]"
+                                    + (buyArmorWithInsertsInitReq.InsertSKUIdSlots.Count > 0 ? " (NOTE: " + buyArmorWithInsertsInitReq.InsertSKUIdSlots.Count + " bought-new SKU inserts not yet resolved)" : ""), Color.Lime);
+                            }
+                            else
+                                Log.WriteLine(1, "[RMC Store][PERSIST] armor insert skipped: tier not resolved (armorInv=" + lo.ArmorInventoryID + ")", Color.Orange);
+                        }
+                        catch (Exception ex) { Log.WriteLine(1, "[RMC Store][PERSIST] armor insert ERROR: " + ex.Message, Color.Red); }
+
+                        trId = TransactionModel.SaveMultiItemTransaction(
+                            client.PID,
+                            buyArmorWithInsertsInitReq.ArmorSkuData.SkuId,
+                            TransactionType.BuyArmourAndAttachInserts,
+                            buyArmorWithInsertsInitReq.ArmorSkuData.VirtualCurrencyType,
+                            buyArmorWithInsertsInitReq.InsertSKUIdSlots
+                        );
+                        reply = new RMCPacketResponseStoreService_InitiateBuyArmourAndAttachInserts(trId);
+                        RMC.SendResponseWithACK(client.udp, p, rmc, client, reply);
+                        // send complete transaction notif on success
+                        if (trId > 0)
+                            SendCompleteNotif(client, trId);
+                    }
                     break;
                 case 31:
-                    var buyArmorWithInsertsComplReq = (RMCPacketRequestStoreService_CompleteBuyArmourAndAttachInserts)rmc.request;
-                    TransactionModel.CompleteTransaction(buyArmorWithInsertsComplReq.TransactionId);
-                    reply = new RMCPacketResponseStoreService_CompleteBuyArmourAndAttachInserts();
-                    RMC.SendResponseWithACK(client.udp, p, rmc, client, reply);
+                    {
+                        var buyArmorWithInsertsComplReq = (RMCPacketRequestStoreService_CompleteBuyArmourAndAttachInserts)rmc.request;
+                        Log.WriteLine(1, "[RMC Store][CAPTURE] (31) CompleteBuyArmourAndAttachInserts pid=" + client.PID + " trId=" + buyArmorWithInsertsComplReq.TransactionId, Color.Cyan);
+                        TransactionModel.CompleteTransaction(buyArmorWithInsertsComplReq.TransactionId);
+                        // Serve current inventory + the persona's equipped-insert loadout so the menu reflects the apply.
+                        var armReply = new RMCPacketResponseStoreService_CompleteBuyArmourAndAttachInserts();
+                        armReply.Inventory = DBHelper.GetAllUserItems(client.PID);
+                        armReply.PersonaArmorTiers = DBHelper.GetPersonaArmorTiersWithInserts(client.PID);
+                        reply = armReply;
+                        RMC.SendResponseWithACK(client.udp, p, rmc, client, reply);
+                    }
+                    break;
+                case 32: // InitiateBuyAndAttachInserts -- attach inserts to an armor the persona ALREADY OWNS.
+                    {
+                        var initIns = (RMCPacketRequestStoreService_InitiateBuyAndAttachInserts)rmc.request;
+                        Log.WriteLine(1, "[RMC Store][CAPTURE] (32) InitiateBuyAndAttachInserts pid=" + client.PID
+                            + " armorInv=" + initIns.ArmorInventoryId
+                            + " InsertSku=[" + string.Join(",", initIns.InsertSKUIdSlots.Select(x => x.Id + "@" + x.Slot)) + "]"
+                            + " InsertInv=[" + string.Join(",", initIns.InsertInventoryIdSlots.Select(x => x.Id + "@" + x.Slot)) + "]"
+                            + " Remove=[" + string.Join(",", initIns.RemoveInventory.Select(x => x.Id + "@" + x.Slot)) + "]"
+                            + " Coupons=[" + string.Join(",", initIns.CouponIds) + "]", Color.Cyan);
+                        // PERSIST: attach the chosen OWNED inserts to the specified OWNED armor, keyed by that
+                        // armor's TIER iid -- the SAME key ClassInfo_Armor reads in-match (armorInventoryId ->
+                        // GetItemIdForInventory), so equip + spawn agree. Guarded so it can never break the menu.
+                        try
+                        {
+                            uint tierIid = DBHelper.GetItemIdForInventory(client.PID, initIns.ArmorInventoryId);
+                            if (tierIid == 0) tierIid = DBHelper.GetItemIdByInventoryId(initIns.ArmorInventoryId);
+                            if (tierIid != 0)
+                            {
+                                foreach (GR5_IdSlotPair pair in initIns.InsertInventoryIdSlots)
+                                {
+                                    uint insIid = DBHelper.GetItemIdForInventory(client.PID, pair.Id);
+                                    if (insIid == 0) insIid = DBHelper.GetItemIdByInventoryId(pair.Id);
+                                    DBHelper.SaveArmorInsert(client.PID, tierIid, pair.Slot, insIid);
+                                }
+                                foreach (GR5_IdSlotPair pair in initIns.RemoveInventory)
+                                    DBHelper.SaveArmorInsert(client.PID, tierIid, pair.Slot, 0);
+                                Log.WriteLine(1, "[RMC Store][PERSIST] owned-armor inserts armorInv=" + initIns.ArmorInventoryId + " tierIid=" + tierIid
+                                    + " now=[" + string.Join(",", DBHelper.GetEquippedArmorInsertIids(client.PID, tierIid)) + "]"
+                                    + (initIns.InsertSKUIdSlots.Count > 0 ? " (NOTE: " + initIns.InsertSKUIdSlots.Count + " bought-new SKU inserts not yet resolved)" : ""), Color.Lime);
+                            }
+                            else
+                                Log.WriteLine(1, "[RMC Store][PERSIST] owned-armor insert skipped: tier not resolved (armorInv=" + initIns.ArmorInventoryId + ")", Color.Orange);
+                        }
+                        catch (Exception ex) { Log.WriteLine(1, "[RMC Store][PERSIST] owned-armor insert ERROR: " + ex.Message, Color.Red); }
+                        // no-cost transaction (owned armor -> nothing bought), like the weapon owned-attach (method 22)
+                        trId = TransactionModel.SaveTransactionRaw(client.PID, TransactionType.BuyAndAttachInserts);
+                        reply = new RMCPacketResponseStoreService_InitiateBuyArmourAndAttachInserts(trId);
+                        RMC.SendResponseWithACK(client.udp, p, rmc, client, reply);
+                        if (trId > 0)
+                            SendCompleteNotif(client, trId);
+                    }
+                    break;
+                case 33: // CompleteBuyAndAttachInserts -- returns inventory + the persona's equipped-insert loadout.
+                    {
+                        var complIns = (RMCPacketRequestStoreService_CompleteBuyArmourAndAttachInserts)rmc.request;
+                        Log.WriteLine(1, "[RMC Store][CAPTURE] (33) CompleteBuyAndAttachInserts pid=" + client.PID + " trId=" + complIns.TransactionId, Color.Cyan);
+                        TransactionModel.CompleteTransaction(complIns.TransactionId);
+                        var insReply = new RMCPacketResponseStoreService_CompleteBuyArmourAndAttachInserts();
+                        insReply.Inventory = DBHelper.GetAllUserItems(client.PID);
+                        insReply.PersonaArmorTiers = DBHelper.GetPersonaArmorTiersWithInserts(client.PID);
+                        reply = insReply;
+                        RMC.SendResponseWithACK(client.udp, p, rmc, client, reply);
+                    }
                     break;
                 default:
                     // CUSTOMIZE-CAPTURE: dump the raw body so an unhandled customize/store apply reveals

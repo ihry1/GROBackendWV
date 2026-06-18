@@ -18,7 +18,7 @@ namespace QuazalWV
                 m_PId = client.PID,
                 m_CgId = 1,
                 m_SessionId = 1,
-                m_TeamId = 1,
+                m_TeamId = 1,   // asker's own RELATIVE team (own view = team 1); in-world coloring uses the pawn teamID (relative per-viewer), not this
                 m_Class = 0,
                 m_Level = 16,
                 m_GhostRank = 8,

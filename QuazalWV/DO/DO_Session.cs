@@ -12,6 +12,14 @@ namespace QuazalWV
         public static uint MatchID = 1;
 
         public static List<DupObj> DupObjs = new List<DupObj>();
+        // 2-player: the session is a process-global singleton SHARED by all clients. Initialize its base
+        // objects ONCE (first join) instead of resetting on every join (which wiped earlier joiners).
+        public static bool initialized = false;
+        public static void EnsureInitialized()
+        {
+            if (!initialized)
+                ResetObjects();
+        }
 
         public static void ResetObjects()
         {
@@ -32,6 +40,7 @@ namespace QuazalWV
                 DupObjs.Add(new DupObj(DupObjClass.IDGenerator, id, 1, new Payload_IDRange(0x1, 0x3FFFFE)));
             DupObjs.Add(new DupObj(DupObjClass.IDGenerator, 0x17, 1, new Payload_IDRange(0x102, 0x3FFFFE)));
             DupObjs.Add(new DupObj(DupObjClass.IDGenerator, 0x19, 1, new Payload_IDRange(0x24, 0x3FFFFE)));
+            initialized = true;
         }
 
         public static DupObj FindObj(uint handle)

@@ -13,7 +13,16 @@ namespace QuazalWV
 
         public RMCPacketResponseProgressionService_GetLevels()
         {
-            levels.Add(new GR5_Level());
+            // Serve the full level -> cumulative-PEC table (the client's ProgressionModel / RDV::Proxy::pProgressionModel).
+            // PREVIOUSLY STUBBED with a single dummy GR5_Level (id0/PEC0/level0) -> the client's ProgressionModel was
+            // effectively EMPTY, so any character that was "ready to level up" (per-char PEC >= NextLevelPEC) walked an
+            // empty/zeroed table and FAILED to load (e.g. a level-50 persona whose PEC == nPEC). A character that is NOT
+            // ready (PEC < nPEC, the normal case) never consulted it, which is why most personas loaded fine.
+            // Levels 1..60 (unlocks require up to level 57); TotalPEC strictly monotonic so the client's level-up walk
+            // terminates correctly. Level L is reached at (L-1)*100 cumulative PEC (level 1 = 0). See gro-character-load-progression.
+            const uint maxLevel = 60;
+            for (uint lvl = 1; lvl <= maxLevel; lvl++)
+                levels.Add(new GR5_Level { m_Id = lvl, m_Level = lvl, m_TotalPEC = (lvl - 1) * 100 });
         }
 
         public override byte[] ToBuffer()
